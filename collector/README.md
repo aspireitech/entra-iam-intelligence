@@ -43,6 +43,12 @@ openssl req -x509 -newkey rsa:2048 -keyout collector/certs/collector.key \
   -subj "/CN=IAM Intelligence Collector"
 ```
 
+(`scripts/bootstrap-server.ps1`/`.sh --with-collector` runs this for you
+automatically if it can find `openssl`. On Windows, if it's not on `PATH`,
+open a **Git Bash** terminal instead of PowerShell — Git for Windows bundles
+`openssl.exe`, just not always on `PATH` in a regular PowerShell/cmd
+session.)
+
 This produces a certificate valid for 730 days (2 years). Set a calendar
 reminder well before that — the collector's own `/health` endpoint reports
 `certExpiresInDays`, and the dashboard should treat anything under 30 days
@@ -111,10 +117,19 @@ Edit `tenants.json`:
 ./start.sh      # macOS/Linux
 ```
 
-Either script installs dependencies on first run (including `better-sqlite3`
-— it ships a prebuilt binary, no separate SQLite install needed) and then
-starts the collector. Equivalent to running `npm install && npm start`
-directly.
+Either script installs dependencies on first run and then starts the
+collector. Equivalent to running `npm install && npm start` directly.
+
+**Requires Node.js 22.5+** (the dashboard SPA only needs Node 20+ — this
+higher requirement is specific to the collector). History is stored using
+Node's own built-in SQLite module (`node:sqlite`), not a third-party native
+package — nothing to compile, no C++ build toolchain, no Visual Studio
+required on Windows. You'll see a one-line `ExperimentalWarning: SQLite...`
+message from Node itself on startup; that's expected and harmless, not an
+error. (An earlier version of this collector used `better-sqlite3`, which
+needs to compile a native addon on machines without a matching prebuilt
+binary — that required Visual Studio's C++ build tools on Windows. Switched
+to Node's built-in SQLite specifically to remove that dependency.)
 
 The collector runs one collection pass immediately, then on the configured
 interval. It listens on `127.0.0.1:8766` by default: `/health`, `/tenants`,

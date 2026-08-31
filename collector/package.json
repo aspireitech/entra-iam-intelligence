@@ -5,13 +5,12 @@
   "type": "module",
   "description": "Optional unattended IAM Intelligence collector. Runs on your own infrastructure (not required to be Azure). Authenticates to Microsoft Graph as an application using a certificate you generate and control - no client secret, no browser secret, private key never leaves this machine.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@azure/msal-node": "^2.16.2",
-    "better-sqlite3": "^13.0.3"
+    "@azure/msal-node": "^2.16.2"
   }
 }
