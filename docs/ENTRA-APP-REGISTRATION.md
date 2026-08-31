@@ -26,15 +26,23 @@ IAM Intelligence is read-only in the monitoring MVP. No write/delete permissions
 | Permission | Purpose |
 |---|---|
 | `User.Read` | Sign in and identify the current operator |
-| `User.ReadBasic.All` | Basic user inventory |
+| `User.Read.All` | User inventory, manager relationships (stale/unmanaged-account signals) |
 | `Application.Read.All` | Application and service-principal inventory |
 | `Group.Read.All` | Groups and memberships |
 | `Device.Read.All` | Device inventory |
-| `AuditLog.Read.All` | Sign-in and directory audit telemetry |
+| `AuditLog.Read.All` | Sign-in and directory audit telemetry, MFA registration report, service-principal activity (beta) |
+
+Requested separately, only when the operator opts into security intelligence (progressive consent, see `src/entraAuth.js` `SECURITY_SCOPES`):
+
+| Permission | Purpose |
+|---|---|
+| `IdentityRiskyUser.Read.All` | Entra ID Protection risky-user data |
+| `RoleManagement.Read.Directory` | Privileged directory role assignments |
+| `Policy.Read.All` | Conditional Access policy inventory |
 
 `ProvisioningLog.Read.All` is intentionally optional and should be requested only when the Provisioning capability is enabled.
 
-Conditional Access and privileged-identity capabilities will receive their own permission review before being enabled; do not add broad `Directory.Read.All` just to make the MVP work.
+Do not add broad `Directory.Read.All` just to make the MVP work.
 
 ## 3. Admin consent
 
