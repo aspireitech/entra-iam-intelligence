@@ -167,6 +167,10 @@ collector/                 Optional Node service (cert auth, app-only)
   src/server.js                 HTTP API
 
 agent/IAM-AD-Agent.ps1     Optional PowerShell service for on-prem Active Directory
+
+scripts/bootstrap-server.ps1/.sh   Fresh-server setup: dashboard + optional collector
+collector/scripts/backup.ps1/.sh    Archives cert + tenants.json + SQLite history
+collector/scripts/restore.ps1/.sh    Restores that archive onto a (new) machine
 ```
 
 ## 4. Metric reference — what's on screen, where it comes from, why it's colored that way
