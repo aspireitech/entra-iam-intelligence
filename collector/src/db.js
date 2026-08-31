@@ -1,16 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
+// Uses Node's own built-in SQLite (stable since Node 22.5, no --experimental-sqlite
+// flag needed on the Node versions this project targets) instead of a third-party
+// native module. better-sqlite3 was tried first but requires compiling a C++ addon
+// via node-gyp when no prebuilt binary matches the host - which needs Visual Studio
+// Build Tools on Windows and isn't installed on most machines by default. Node's
+// built-in SQLite ships with the Node binary itself: zero extra install, ever.
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 let db;
 
 export function getDb() {
   if (db) return db;
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  db = new Database(path.join(DATA_DIR, 'history.sqlite'));
-  db.pragma('journal_mode = WAL');
+  db = new DatabaseSync(path.join(DATA_DIR, 'history.sqlite'));
+  db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,12 +96,22 @@ export function getDelta(tenantId, days = 30) {
 }
 
 export function upsertAppEvents(tenantId, events) {
-  const stmt = getDb().prepare(`
+  if (!events.length) return;
+  const database = getDb();
+  const stmt = database.prepare(`
     INSERT OR IGNORE INTO app_events (audit_id, tenant_id, app_id, app_name, event_type, actor_type, actor_name, activity_datetime, observed_at)
     VALUES (@audit_id, @tenant_id, @app_id, @app_name, @event_type, @actor_type, @actor_name, @activity_datetime, @observed_at)
   `);
-  const insertMany = getDb().transaction((rows) => { for (const r of rows) stmt.run(r); });
-  insertMany(events.map(e => ({ ...e, tenant_id: tenantId, observed_at: new Date().toISOString() })));
+  // node:sqlite's DatabaseSync has no .transaction() convenience wrapper (unlike
+  // better-sqlite3), so this wraps the batch explicitly.
+  database.exec('BEGIN');
+  try {
+    for (const e of events) stmt.run({ ...e, tenant_id: tenantId, observed_at: new Date().toISOString() });
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 export function getAppEvents(tenantId, days = 30) {

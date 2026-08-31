@@ -50,16 +50,32 @@ if ($RestoreFromBackup) {
   # Fresh install: generate a certificate if one doesn't already exist.
   $certPem = Join-Path $CollectorRoot 'certs\collector.pem'
   if (-not (Test-Path $certPem)) {
+    $opensslCmd = $null
     if (Get-Command openssl -ErrorAction SilentlyContinue) {
-      Write-Host "Generating a new certificate (collector/certs/collector.pem + .key)..." -ForegroundColor Cyan
+      $opensslCmd = 'openssl'
+    } else {
+      # Not on PATH doesn't mean not installed - Git for Windows bundles openssl.exe
+      # but its installer doesn't always add it to PATH. Check the well-known locations
+      # before telling the user to install anything extra.
+      $candidates = @(
+        (Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Git\usr\bin\openssl.exe')
+      ) | Where-Object { $_ -and (Test-Path $_) }
+      if ($candidates) { $opensslCmd = $candidates[0] }
+    }
+
+    if ($opensslCmd) {
+      Write-Host "Generating a new certificate (collector/certs/collector.pem + .key) using $opensslCmd..." -ForegroundColor Cyan
       New-Item -ItemType Directory -Force -Path (Join-Path $CollectorRoot 'certs') | Out-Null
-      openssl req -x509 -newkey rsa:2048 -keyout (Join-Path $CollectorRoot 'certs\collector.key') `
+      & $opensslCmd req -x509 -newkey rsa:2048 -keyout (Join-Path $CollectorRoot 'certs\collector.key') `
         -out $certPem -days 730 -nodes -subj "/CN=IAM Intelligence Collector"
       Write-Host "Certificate generated. You still need to upload the PUBLIC key (collector/certs/collector.pem)" -ForegroundColor Yellow
       Write-Host "to the Entra app registration's Certificates & secrets blade and grant admin consent - see collector/README.md." -ForegroundColor Yellow
     } else {
-      Write-Host "openssl not found on PATH (it ships with Git for Windows - try a 'Git Bash' terminal, or install Git for Windows)." -ForegroundColor Red
-      Write-Host "Generate the certificate manually per collector/README.md before running the collector." -ForegroundColor Red
+      Write-Host "openssl not found on PATH or in Git for Windows' bundled location." -ForegroundColor Red
+      Write-Host "Easiest fix: open a 'Git Bash' terminal (Start menu, if Git for Windows is installed) and run:" -ForegroundColor Red
+      Write-Host "  openssl req -x509 -newkey rsa:2048 -keyout collector/certs/collector.key -out collector/certs/collector.pem -days 730 -nodes -subj `"/CN=IAM Intelligence Collector`"" -ForegroundColor Yellow
+      Write-Host "Then re-run this script, or just run '.\collector\start.ps1' once the certificate exists." -ForegroundColor Red
     }
   } else {
     Write-Host "Certificate already present - leaving it as is." -ForegroundColor Green

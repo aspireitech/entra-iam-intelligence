@@ -19,6 +19,19 @@
 
 **Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
+### Fixed: collector `npm install` failed on Windows without Visual Studio (second real-tenant test finding)
+
+`better-sqlite3` requires compiling a native C++ addon via `node-gyp` when no
+prebuilt binary matches the host, which needs Visual Studio's "Desktop
+development with C++" workload - not installed on a typical Windows
+machine, and a large (~6GB) ask just to get a database. Replaced with
+Node's own built-in `node:sqlite` module: zero native compilation, ships
+with the Node binary itself. Requires Node 22.5+ (bumped from 20+ for the
+collector only - the dashboard SPA is unaffected). Also fixed
+`scripts/bootstrap-server.ps1`'s certificate generation to check Git for
+Windows' bundled `openssl.exe` location before giving up when it's not on
+`PATH`.
+
 ### Added: historical trend, delta, and app-registration source tracking (collector)
 
 The collector now appends a row per poll to `collector/data/history.sqlite`
