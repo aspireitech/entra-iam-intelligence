@@ -46,7 +46,7 @@ registration **every connected tenant's own admin must grant it separately**.
 | `Application.Read.All` | App/service-principal inventory and credential expiry | `/applications` |
 | `Group.Read.All` | Group inventory | `/groups` |
 | `Device.Read.All` | Device inventory | `/devices` |
-| `AuditLog.Read.All` | Sign-in counts, MFA registration report | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails` |
+| `AuditLog.Read.All` | Sign-in counts, MFA registration report, new-application creation events (actor: user vs. application) | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails`, `/auditLogs/directoryAudits` |
 | `IdentityRiskyUser.Read.All` | Risky users | `/identityProtection/riskyUsers` |
 | `RoleManagement.Read.Directory` | Privileged role assignments | `/roleManagement/directory/roleAssignments` |
 | `Policy.Read.All` | Conditional Access policy count | `/identity/conditionalAccess/policies` |

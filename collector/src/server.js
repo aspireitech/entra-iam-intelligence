@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { loadAllSnapshots, loadSnapshot, combineSnapshots } from './store.js';
 import { certExpiry } from './msal.js';
+import { getHistory, getDelta, getAppEvents } from './db.js';
 
 function json(res, status, payload) {
   res.writeHead(status, {
@@ -60,7 +61,27 @@ export function startServer(config) {
       return json(res, 200, combineSnapshots(snaps));
     }
 
-    json(res, 404, { error: 'Not found', endpoints: ['/health', '/tenants', '/tenants/:id/snapshot', '/combined'] });
+    const historyMatch = url.pathname.match(/^\/tenants\/([^/]+)\/history$/);
+    if (historyMatch) {
+      const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 30));
+      return json(res, 200, { tenantId: historyMatch[1], days, points: getHistory(historyMatch[1], days) });
+    }
+
+    const deltaMatch = url.pathname.match(/^\/tenants\/([^/]+)\/delta$/);
+    if (deltaMatch) {
+      const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 30));
+      const delta = getDelta(deltaMatch[1], days);
+      if (!delta) return json(res, 200, { tenantId: deltaMatch[1], days, available: false, reason: 'Not enough historical data yet - need at least two collection cycles in this window.' });
+      return json(res, 200, { tenantId: deltaMatch[1], days, available: true, ...delta });
+    }
+
+    const eventsMatch = url.pathname.match(/^\/tenants\/([^/]+)\/app-events$/);
+    if (eventsMatch) {
+      const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 30));
+      return json(res, 200, { tenantId: eventsMatch[1], days, events: getAppEvents(eventsMatch[1], days) });
+    }
+
+    json(res, 404, { error: 'Not found', endpoints: ['/health', '/tenants', '/tenants/:id/snapshot', '/tenants/:id/history', '/tenants/:id/delta', '/tenants/:id/app-events', '/combined'] });
   });
   const port = config.port || 8766;
   server.listen(port, '127.0.0.1', () => console.log(`[collector] API listening on http://127.0.0.1:${port}`));

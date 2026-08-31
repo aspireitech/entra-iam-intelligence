@@ -19,6 +19,82 @@
 
 **Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
+### Added: historical trend, delta, and app-registration source tracking (collector)
+
+The collector now appends a row per poll to `collector/data/history.sqlite`
+instead of only overwriting the latest JSON snapshot, and separately tracks
+`/auditLogs/directoryAudits` "Add application" events. New endpoints:
+`/tenants/:id/history`, `/tenants/:id/delta`, `/tenants/:id/app-events`. The
+Applications page's new Growth Trend and Recently Registered Applications
+cards read these — both require the collector to be running and tracking
+the currently-viewed tenant's ID; otherwise they say so explicitly. See
+`docs/ARCHITECTURE.md` §2 for the full data-flow diagrams and `collector/README.md`
+for what "actor: user vs. application" does and doesn't tell you about an
+app registration's source.
+
+### Fixed: Identity Health Score label color didn't match severity
+
+The "Good"/"Needs attention"/"At risk" label under the Health Score was
+hardcoded green in CSS regardless of the actual score - a 10/100 "At risk"
+score rendered in the same green as an 85/100 "Good" one. Now conditional
+on the score band (`good`/`warn`/`bad`/`unknown` classes).
+
+### Fixed: application-population mismatch (first real-tenant test finding)
+
+`/reports/servicePrincipalSignInActivities` returns every service principal in
+the directory, including hundreds of Microsoft first-party ones (Graph,
+Exchange Online, Teams, ...) that were never part of "Total Applications".
+Bucketing that unfiltered report against the smaller `/applications` count
+produced bucket totals and percentages above 100% (observed: 364 of 11 =
+3309%) and fed a corrupted `inactiveAppRate` into the Identity Health Score.
+Fixed by matching the activity report to the tenant's own app registrations
+by `appId` before bucketing (`src/entraAuth.js` `bucketAppActivity`) — bucket
+totals now always sum to the real application count.
+
+### Fixed: risk/health cards silently treating "unavailable" as "zero"
+
+Identity Risk Overview rendered a green "100% not flagged" donut whenever
+`riskyUsers` was `null` (permission/license unavailable), which is the exact
+"BAD: Risky users = 0" pattern this product's core principle forbids. It now
+renders an explicit "permission/license required" state instead, and reports
+the real Graph error text via `riskyUsersReason`. The same pattern was
+applied to the sign-in trend/KPIs (`signInsAvailable`/`signInsReason`) — a
+tenant without an Entra ID P1/P2 license will see why sign-in data is
+unavailable rather than a bare "No data" or a false zero.
+
+### Added: Toxic Combinations and a Risk Register
+
+New nav sections cross-reference signals already collected (by AAD object
+id) into compound findings instead of five unrelated counts: a privileged
+user who also lacks MFA, is flagged risky by ID Protection, or is stale
+90+ days shows up as one row under **Toxic Combinations**, not scattered
+across three separate cards. Every acknowledged Need Attention or Toxic
+Combination finding now lands in a dedicated **Risk Register** page (still
+`localStorage`-backed, not yet shared across users) instead of only being
+visible transiently on the Overview page.
+
+### Added: adjustable thresholds on Users and Applications detail pages
+
+The Users page's stale-account table and the Applications page's
+credential-expiry highlighting both have a selector (30/60/90/180 days for
+staleness; 15/30/60/90 for credential expiry) computed client-side from data
+already in the snapshot — no extra Graph calls. The Overview KPIs and Need
+Attention counts always use the fixed thresholds (90 days stale, 30 days
+credential expiry) for consistency; the detail-page selectors are for
+investigation, not for changing what counts as "attention-worthy" tenant-wide.
+
+### Added: per-metric drill-down navigation and Need Attention exceptions
+
+KPI tiles, Need Attention rows, and card footers now navigate to a real
+detail page (Users, Applications, Devices, Sign-ins, Risk Overview,
+Conditional Access) built from data already collected in the snapshot,
+instead of silently re-rendering Overview. Sidebar navigation is pruned per
+data source — only sections with a real implementation for the active
+source are shown. Need Attention rows can be acknowledged with a required
+note (stored in browser `localStorage`, not synced/shared); acknowledged
+items stay visible in a footer chip rather than disappearing, so nothing is
+silently hidden.
+
 **Expected:** no Contoso names, demo users, hard-coded dashboard numbers, or fabricated application names appear.
 
 ## Phase 2 — Security intelligence
