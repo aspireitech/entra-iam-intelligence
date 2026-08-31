@@ -33,6 +33,28 @@ needs them (progressive consent — see `src/entraAuth.js`).
 Never requested: `Directory.Read.All` or any `.ReadWrite` scope. See
 `docs/ENTRA-APP-REGISTRATION.md` for app-registration setup.
 
+### Microsoft Entra ID — application (app-only) permissions for the collector
+
+Used only by the optional, unattended `collector/` service (certificate
+auth, no browser involvement — see `collector/README.md`). Application
+permissions always require admin consent, and on a multitenant app
+registration **every connected tenant's own admin must grant it separately**.
+
+| Permission | Purpose | Endpoint(s) |
+|---|---|---|
+| `User.Read.All` | User inventory, stale/manager signals, license assignment | `/users` |
+| `Application.Read.All` | App/service-principal inventory and credential expiry | `/applications` |
+| `Group.Read.All` | Group inventory | `/groups` |
+| `Device.Read.All` | Device inventory | `/devices` |
+| `AuditLog.Read.All` | Sign-in counts, MFA registration report | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails` |
+| `IdentityRiskyUser.Read.All` | Risky users | `/identityProtection/riskyUsers` |
+| `RoleManagement.Read.Directory` | Privileged role assignments | `/roleManagement/directory/roleAssignments` |
+| `Policy.Read.All` | Conditional Access policy count | `/identity/conditionalAccess/policies` |
+| `Organization.Read.All` | Tenant identity, license SKUs | `/organization`, `/subscribedSkus` |
+
+Never requested: any `.ReadWrite` application permission, `Directory.Read.All`,
+or `Mail.Read`/`Files.Read.All`-class permissions unrelated to identity.
+
 ## Active Directory — Live (agent-based, not OAuth)
 
 Auth model is different by necessity: a browser cannot reach an on-prem

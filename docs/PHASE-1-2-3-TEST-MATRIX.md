@@ -68,9 +68,28 @@ VITE_AD_AGENT_TOKEN=<same-token>
 
 The dashboard checks `/health` before selecting AD as an active live source. The AD snapshot exposes read-only counts for users, groups, computers, domain controllers, stale accounts/computers, users without managers, and privileged-group membership.
 
+### All Identity Sources (Combined) — multi-tenant collector
+
+Run the collector (see `collector/README.md`): certificate-authenticated,
+app-only Graph access, no browser secret. Configure `VITE_COLLECTOR_URL`
+(and `VITE_COLLECTOR_TOKEN` if the collector sets `collectorToken`).
+
+- `/health` reports each configured tenant's certificate expiry
+  (`certExpiresInDays`) — the dashboard's Collector Certificate Health card
+  must flag anything ≤30 days.
+- The combined view aggregates users/applications/groups/devices/risky
+  users/privileged users/credential-expiry across every tenant the
+  collector is configured for, plus a per-tenant breakdown table.
+- If the collector is unreachable, the combined view shows an explicit
+  "collector not reachable" message — never zeros or stale numbers
+  presented as current.
+
 ### Other sources
 
-Microsoft 365, ServiceNow and Splunk are represented in the source control plane but remain `Connector not configured` until their dedicated API connectors are implemented/configured. They are never presented as connected or populated with demo values.
+SailPoint and Saviynt are represented in the source control plane but
+remain `Connector not configured` until their dedicated connectors are
+built (see `docs/PERMISSIONS.md` for the target permission model). They are
+never presented as connected or populated with demo values.
 
 ## Manual acceptance test
 
@@ -89,6 +108,8 @@ Microsoft 365, ServiceNow and Splunk are represented in the source control plane
 13. Grant the optional security scopes and confirm risky users, privileged users and Conditional Access policy count populate.
 14. Start the AD agent and configure `VITE_AD_AGENT_URL`; switch the source to Active Directory and verify domain/user/group/computer/DC counts match PowerShell.
 15. Stop the AD agent; confirm the source changes to unavailable rather than showing stale/fake data.
+16. Start the collector against at least two real tenants (each admin-consented per `collector/README.md`), configure `VITE_COLLECTOR_URL`, select "All Identity Sources" and confirm the combined KPIs equal the sum of the two tenants' individual Entra dashboard values, the per-tenant table matches each tenant, and Collector Certificate Health shows the real certificate's remaining days.
+17. Stop the collector; confirm the combined view shows "collector not reachable" rather than the last cached numbers presented as current.
 
 ## Security expectations
 

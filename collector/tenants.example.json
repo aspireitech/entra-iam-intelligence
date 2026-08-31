@@ -1,0 +1,12 @@
+{
+  "clientId": "ab342dfc-cab4-45f3-acdb-3e49d606f418",
+  "certPath": "./certs/collector.pem",
+  "certKeyPath": "./certs/collector.key",
+  "collectorToken": "REPLACE-WITH-A-LONG-RANDOM-TOKEN",
+  "intervalSeconds": 900,
+  "port": 8766,
+  "tenants": [
+    { "id": "00000000-0000-0000-0000-000000000000", "displayName": "Example Tenant A" },
+    { "id": "11111111-1111-1111-1111-111111111111", "displayName": "Example Tenant B" }
+  ]
+}

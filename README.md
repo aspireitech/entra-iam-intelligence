@@ -17,10 +17,13 @@ Implemented:
 - Need Attention signals (MFA gaps, risky users, stale accounts, privileged roles, inactive apps) sourced from live queries, never defaulted to zero on API failure
 - Identity Health Score computed from live MFA/risk/stale-user/app-hygiene signals, not a static number
 - Progressive security-permission consent (ID Protection, privileged roles, Conditional Access) requested separately from core scopes
-- Data Sources control plane: Microsoft Entra (live) and a read-only Active Directory agent (`agent/IAM-AD-Agent.ps1`); other sources are listed but explicitly marked "Connector not configured," never shown as connected
+- Licenses page: purchased/assigned/available seats per Microsoft 365 SKU, stale-licensed-account detection, reclamation recommendations (`Organization.Read.All`, progressive consent)
+- Application Credential Expiry: tenant app registrations' client secrets/certificates, with a ≤30-day rotation warning
+- Auto-refresh every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s) while the tab is open and signed in
+- Data Sources control plane: Microsoft Entra (live), a read-only Active Directory agent (`agent/IAM-AD-Agent.ps1`), and an optional certificate-authenticated multi-tenant collector (`collector/`, see its README) powering a combined cross-tenant view; SailPoint and Saviynt are listed but not yet built, and are never shown as connected
 - Sign-out clears the MSAL session and local tenant/session state
 
-Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product handoff for the full roadmap): a normalized cross-source entity model, per-metric "how this was calculated" drill-down, application credential/owner detail, a separate tenant Disconnect action, and additional connectors beyond Entra/AD.
+Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product handoff for the full roadmap): a normalized cross-source entity model, per-metric "how this was calculated" drill-down, a separate tenant Disconnect action, historical trend storage in the collector, and the SailPoint/Saviynt connectors themselves (permission model documented in `docs/PERMISSIONS.md`, not yet built).
 
 **No Microsoft client secret or certificate is ever used in the browser.**
 
