@@ -5,6 +5,7 @@ const authority = import.meta.env.VITE_ENTRA_AUTHORITY || 'https://login.microso
 
 export const AUTH_CONFIGURED = Boolean(clientId);
 
+// Monitoring MVP: delegated, read-only Graph permissions. No write permissions are requested.
 export const GRAPH_SCOPES = [
   'User.ReadBasic.All',
   'Application.Read.All',
@@ -64,6 +65,7 @@ export async function connectTenant() {
   let account = instance.getActiveAccount() || instance.getAllAccounts()[0];
   if (!account) account = await signIn();
 
+  // Incremental consent: the monitoring permissions are requested only when the user chooses Connect Tenant.
   const result = await instance.acquireTokenPopup({
     account,
     scopes: GRAPH_SCOPES,
@@ -96,7 +98,11 @@ export async function getGraphToken(scopes = GRAPH_SCOPES) {
 export async function graphGet(path, scopes = GRAPH_SCOPES) {
   const token = await getGraphToken(scopes);
   const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      ConsistencyLevel: 'eventual',
+    },
   });
   if (!response.ok) {
     const body = await response.text();
@@ -108,10 +114,10 @@ export async function graphGet(path, scopes = GRAPH_SCOPES) {
 export async function getTenantSnapshot() {
   const [organization, applications, users, groups, devices] = await Promise.all([
     graphGet('/organization?$select=id,displayName,tenantType'),
-    graphGet('/applications?$top=1'),
-    graphGet('/users?$top=1'),
-    graphGet('/groups?$top=1'),
-    graphGet('/devices?$top=1'),
+    graphGet('/applications?$count=true&$top=1'),
+    graphGet('/users?$count=true&$top=1'),
+    graphGet('/groups?$count=true&$top=1'),
+    graphGet('/devices?$count=true&$top=1'),
   ]);
 
   return {
@@ -127,7 +133,7 @@ export async function getTenantSnapshot() {
 
 export async function getRecentSignIns() {
   const from = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  return graphGet(`/auditLogs/signIns?$filter=createdDateTime ge ${from}&$top=50&$orderby=createdDateTime desc`);
+  return graphGet(`/auditLogs/signIns?$filter=createdDateTime ge ${encodeURIComponent(from)}&$top=50&$orderby=createdDateTime desc`);
 }
 
 export function getSignedInAccount() {
