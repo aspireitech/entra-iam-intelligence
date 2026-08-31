@@ -2,7 +2,6 @@ import {
   AUTH_CONFIGURED,
   connectTenant,
   disconnectTenant,
-  getSignedInAccount,
   getTenantSnapshot,
   initializeAuth,
   signIn,
@@ -25,21 +24,25 @@ document.head.appendChild(style);
 let connected = false;
 let panelOpen = false;
 let account = null;
+let errorMessage = '';
 
 function fmt(value) {
   if (value === null || value === undefined) return '—';
   return new Intl.NumberFormat().format(value);
 }
 
-function render(message = '') {
+function render() {
+  const signedIn = Boolean(account);
+  const stateText = connected ? `Connected · ${account?.name || account?.username || 'Tenant'}` : signedIn ? `Signed in · ${account?.username || 'Microsoft'}` : 'Not signed in';
+  const buttonText = connected ? 'Manage' : signedIn ? 'Connect' : AUTH_CONFIGURED ? 'Sign in' : 'Setup';
   root.innerHTML = `
     <div class="eii-connect">
-      <span class="eii-status ${connected ? 'on' : (message ? 'err' : '')}"></span>
-      <span>${connected ? `Connected · ${account?.name || account?.username || 'Tenant'}` : 'Entra not connected'}</span>
-      <button class="eii-button" id="eii-toggle">${connected ? 'Manage' : (AUTH_CONFIGURED ? 'Connect' : 'Setup')}</button>
+      <span class="eii-status ${connected ? 'on' : (errorMessage ? 'err' : '')}"></span>
+      <span>${stateText}</span>
+      <button class="eii-button" id="eii-toggle">${buttonText}</button>
       <div class="eii-panel ${panelOpen ? 'open' : ''}" id="eii-panel">
         <h3>Microsoft Entra connection</h3>
-        <p>${connected ? 'Read-only monitoring connection. The dashboard is using your tenant data for the connected session.' : AUTH_CONFIGURED ? 'Sign in first, then grant the requested read-only Microsoft Graph permissions when you choose Connect Tenant.' : 'Authentication is not configured on this machine. Add VITE_ENTRA_CLIENT_ID to .env.local and restart the dev server.'}</p>
+        <p>${connected ? 'Read-only monitoring connection. The dashboard is using your tenant data for this connected session.' : signedIn ? 'You are signed in to the application. Connect a tenant only when you want Entra IAM Intelligence to request the monitoring permissions.' : AUTH_CONFIGURED ? 'Step 1: sign in to the application. Step 2: choose Connect Tenant to request the read-only Microsoft Graph permissions.' : 'Authentication is not configured on this machine. Add VITE_ENTRA_CLIENT_ID to .env.local and restart the dev server.'}</p>
         ${connected ? `
           <div class="row"><span>Tenant</span><span>${account?.tenantId || 'Current tenant'}</span></div>
           <div class="row"><span>Signed in as</span><span>${account?.username || '—'}</span></div>
@@ -47,17 +50,23 @@ function render(message = '') {
           <div class="row"><span>Users</span><span id="eii-user-count">Loading…</span></div>
           <div class="row"><span>Groups</span><span id="eii-group-count">Loading…</span></div>
           <div class="row"><span>Devices</span><span id="eii-device-count">Loading…</span></div>
-          <div class="eii-message">No write or delete permissions are requested by this monitoring MVP.</div>
+          <div class="eii-message">Read-only monitoring. No write or delete permissions are requested by this MVP.</div>
           <button class="eii-button danger" id="eii-disconnect">Disconnect tenant</button>
+        ` : signedIn ? `
+          <div class="row"><span>Signed in as</span><span>${account?.username || '—'}</span></div>
+          <button class="eii-button" id="eii-connect">Connect tenant & request monitoring access</button>
+          <button class="eii-button danger" id="eii-signout">Sign out</button>
         ` : `
-          <button class="eii-button" id="eii-connect">${AUTH_CONFIGURED ? 'Sign in & connect tenant' : 'Authentication not configured'}</button>
-          ${message ? `<div class="eii-message error">${message}</div>` : ''}
+          <button class="eii-button" id="eii-signin">${AUTH_CONFIGURED ? 'Sign in with Microsoft' : 'Authentication not configured'}</button>
         `}
+        ${errorMessage ? `<div class="eii-message error">${escapeHtml(errorMessage)}</div>` : ''}
       </div>
     </div>`;
 
   document.getElementById('eii-toggle')?.addEventListener('click', () => { panelOpen = !panelOpen; render(); if (connected) loadSnapshot(); });
+  document.getElementById('eii-signin')?.addEventListener('click', handleSignIn);
   document.getElementById('eii-connect')?.addEventListener('click', handleConnect);
+  document.getElementById('eii-signout')?.addEventListener('click', handleDisconnect);
   document.getElementById('eii-disconnect')?.addEventListener('click', handleDisconnect);
 }
 
@@ -71,9 +80,7 @@ function updateDashboard(snapshot) {
   setDashboardValue(1, snapshot.counts.applications);
   setDashboardValue(2, snapshot.counts.devices);
   const live = document.querySelector('.live-row');
-  if (live && snapshot.tenant) {
-    live.innerHTML = `<span class="live-dot"></span> Tenant: <strong>${snapshot.tenant.displayName || 'Connected tenant'}</strong><span class="separator">•</span> Live Graph connection`;
-  }
+  if (live && snapshot.tenant) live.innerHTML = `<span class="live-dot"></span> Tenant: <strong>${escapeHtml(snapshot.tenant.displayName || 'Connected tenant')}</strong><span class="separator">•</span> Live Graph connection`;
   const source = document.querySelector('.sources > div:first-child');
   if (source) source.innerHTML = '<span>◆ Microsoft Entra ID</span><small>Connected · Live</small>';
 }
@@ -85,14 +92,31 @@ async function loadSnapshot() {
     const map = { applications: 'eii-app-count', users: 'eii-user-count', groups: 'eii-group-count', devices: 'eii-device-count' };
     Object.entries(map).forEach(([key, id]) => { const el = document.getElementById(id); if (el) el.textContent = fmt(snapshot.counts[key]); });
   } catch (error) {
-    const panel = document.getElementById('eii-panel');
-    if (panel) panel.insertAdjacentHTML('beforeend', `<div class="eii-message error">${escapeHtml(error.message)}</div>`);
+    errorMessage = formatAuthError(error);
+    render();
+    panelOpen = true;
+  }
+}
+
+async function handleSignIn() {
+  errorMessage = '';
+  const button = document.getElementById('eii-signin');
+  if (button) { button.disabled = true; button.textContent = 'Signing in…'; }
+  try {
+    account = await signIn();
+    panelOpen = true;
+    render();
+  } catch (error) {
+    errorMessage = formatAuthError(error);
+    panelOpen = true;
+    render();
   }
 }
 
 async function handleConnect() {
+  errorMessage = '';
   const button = document.getElementById('eii-connect');
-  if (button) { button.disabled = true; button.textContent = 'Connecting…'; }
+  if (button) { button.disabled = true; button.textContent = 'Requesting access…'; }
   try {
     const result = await connectTenant();
     account = result.account;
@@ -101,8 +125,9 @@ async function handleConnect() {
     render();
     await loadSnapshot();
   } catch (error) {
-    render(formatAuthError(error));
+    errorMessage = formatAuthError(error);
     panelOpen = true;
+    render();
   }
 }
 
@@ -112,6 +137,7 @@ async function handleDisconnect() {
   } finally {
     connected = false;
     account = null;
+    errorMessage = '';
     panelOpen = false;
     render();
   }
@@ -128,12 +154,6 @@ function formatAuthError(error) {
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
 
 (async () => {
-  try {
-    account = await initializeAuth();
-    if (account) {
-      connected = false;
-      // Authentication may exist without monitoring consent. Keep the explicit Connect action.
-    }
-  } catch (_) { /* keep the dashboard usable in demo mode */ }
+  try { account = await initializeAuth(); } catch (_) { /* keep demo mode available */ }
   render();
 })();
