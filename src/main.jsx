@@ -1,115 +1,63 @@
-import React, { useMemo, useState } from 'react';
-import { createRoot } from 'react-dom/client';
+import React,{useEffect,useMemo,useState} from 'react';
+import {createRoot} from 'react-dom/client';
 import './styles.css';
+import {connectSecurityScopes,signOut} from './entraAuth.js';
+import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot} from './dataSources.js';
+import {syncLiveTenantData} from './liveTenantData.js';
 
-const attention = [
-  { level: 'critical', title: 'Password Expired Users', detail: 'Users with expired passwords', value: 128, action: 'Review users' },
-  { level: 'warning', title: 'Inactive Applications > 90 Days', detail: 'No sign-ins in 90 days', value: 46, action: 'Review applications' },
-  { level: 'warning', title: 'Users Without MFA', detail: 'High-risk users', value: 214, action: 'Review MFA gaps' },
-  { level: 'info', title: 'Orphaned Accounts', detail: 'No owner or manager', value: 36, action: 'Review accounts' },
-  { level: 'critical', title: 'Over-Privileged Users', detail: 'Admin roles with high access', value: 18, action: 'Start review' },
-];
+const nav=[['Overview','⌂'],['Users','♙'],['Groups','♧'],['Applications','▦'],['Devices','▱'],['Identities','◉'],['__Protection',''],['Risk Overview','◈'],['Sign-ins','↪'],['Access Reviews','▣'],['Conditional Access','◌'],['__Operations',''],['Provisioning','⇄'],['Audit Logs','≡'],['Alerts','♢'],['Workflows','◇'],['__Reports',''],['Reports','▤'],['Data Explorer','⌕'],['__Admin',''],['Settings','⚙'],['Data Sources','◈']];
+const fmt=n=>n==null?'—':Number(n).toLocaleString();
+const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
+function Icon({children}){return <span className="nav-icon">{children}</span>}
+function Card({title,children,actionLabel,onAction,className=''}){return <div className={`card ${className}`}><div className="card-header"><h3>{title}</h3>{actionLabel&&<button className="header-action" onClick={onAction}>{actionLabel}</button>}</div>{children}</div>}
+function Donut({segments,total,label}){const sum=segments.reduce((a,s)=>a+(s.value||0),0)||1;let cursor=0;const stops=segments.map(s=>{const start=cursor;cursor+=(s.value||0)/sum*100;return `${s.color} ${start}% ${cursor}%`;}).join(',');return <div className="donut" style={{background:`conic-gradient(${stops})`}}><div className="donut-hole"><strong>{fmt(total)}</strong><span>{label}</span></div></div>}
+function BarChart({items}){const max=Math.max(...items.map(x=>x.value||0),1);return <div className="bar-chart">{items.map((x,i)=><div className="bar-col" key={`${x.name}-${i}`}><div className="bar-value">{fmt(x.value)}</div><div className={`bar b${i%5}`} style={{height:`${Math.max(9,(x.value/max)*125)}px`}}></div><span title={x.name}>{x.name}</span></div>)}</div>}
+function Sparkline({points}){const usable=points.filter(p=>p.total!=null);if(!usable.length)return <div className="empty-state">No sign-in trend data available.</div>;const max=Math.max(...usable.map(p=>p.total),1);const coords=usable.map((p,i)=>`${(i/Math.max(1,usable.length-1))*392+8},${84-(p.total/max)*70}`).join(' ');return <svg className="spark" viewBox="0 0 408 92" preserveAspectRatio="none"><polyline points={coords} fill="none" stroke="currentColor" strokeWidth="2.5"/><line x1="0" y1="88" x2="408" y2="88" stroke="rgba(255,255,255,.07)"/><line x1="0" y1="44" x2="408" y2="44" stroke="rgba(255,255,255,.05)"/></svg>}
+function Status({ok,label='Live'}){return <span className={`status-pill ${ok?'ok':'warn'}`}><i/> {ok?label:'Permission required'}</span>}
 
-const activities = [
-  ['10:24 AM', 'User Login', 'John.Doe@contoso.com', 'Microsoft 365', 'Success', 'Low'],
-  ['09:18 AM', 'Application Provisioned', 'Admin@contoso.com', 'New Salesforce App', 'Success', 'Medium'],
-  ['08:45 AM', 'Password Reset', 'Sarah.Wilson@contoso.com', 'Self Service', 'Success', 'Low'],
-  ['08:12 AM', 'Failed Sign-in', 'Unknown IP', 'Alex.Miller@contoso.com', 'Failed', 'High'],
-  ['07:58 AM', 'Role Assigned', 'Admin@contoso.com', 'Global Admin Role', 'Success', 'High'],
-];
-
-const nav = [
-  ['Overview', '⌂'], ['Users', '♙'], ['Groups', '♧'], ['Applications', '▦'], ['Devices', '▱'], ['Identities', '◉'],
-  ['__Protection', ''], ['Risk Overview', '◈'], ['Sign-ins', '↪'], ['Access Reviews', '▣'], ['Conditional Access', '◌'],
-  ['__Operations', ''], ['Provisioning', '⇄'], ['Audit Logs', '≡'], ['Alerts', '♢'], ['Workflows', '◇'],
-  ['__Reports', ''], ['Reports', '▤'], ['Data Explorer', '⌕'], ['__Admin', ''], ['Settings', '⚙'], ['Data Sources', '◈'],
-];
-
-function Icon({ children }) { return <span className="nav-icon">{children}</span>; }
-function Donut({ segments, total, label }) {
-  const gradient = `conic-gradient(#31b75a 0 53.2%, #f1a21a 53.2% 77.6%, #e86c32 77.6% 91.4%, #e85555 91.4% 100%)`;
-  return <div className="donut" style={{ background: gradient }}><div className="donut-hole"><strong>{total}</strong><span>{label}</span></div></div>;
+function EntraDashboard({data,onSecurity}){
+  const attention=[
+    {level:'warning',title:'Users Without MFA',detail:'No registered MFA method in the authentication registration report',value:data.mfa?.missing},
+    {level:'warning',title:'Inactive Applications > 90 Days',detail:'No observed service-principal sign-in activity for more than 90 days',value:(data.appActivity?.inactive91to180||0)+(data.appActivity?.inactive180||0)},
+    {level:'critical',title:'Risky Users',detail:'Users currently returned by Microsoft Entra ID Protection',value:data.riskyUsers},
+    {level:'warning',title:'Stale Enabled Users > 90 Days',detail:'Enabled accounts with no sign-in in the last 90 days',value:data.staleUsers},
+    {level:'critical',title:'Privileged Users',detail:'Unique principals assigned to detected built-in privileged roles',value:data.privilegedUsers}
+  ];
+  const attentionCount=attention.reduce((n,x)=>n+(x.value||0),0);const b=data.appActivity||{};
+  const appSegments=[{value:b.active30,color:'#31b75a'},{value:b.inactive31to90,color:'#f1a21a'},{value:b.inactive91to180,color:'#e86c32'},{value:b.inactive180,color:'#e85555'}];
+  const score=data.healthScore;
+  return <>
+    {!data.securityPermissionReady&&<div className="permission-banner"><div><strong>Security intelligence permissions are not fully validated.</strong><span>Core Entra data is live. Grant the read-only security scopes to enable risk, privileged-role and Conditional Access analytics.</span></div><button className="primary" onClick={onSecurity}>Grant security permissions</button></div>}
+    <section className="kpis">{[['Total Users',data.users,'users','♙'],['Total Applications',data.applications,'apps','▦'],['Active Devices',data.devices,'devices','▱'],['Sign-ins (7D)',data.signIns7d,'signin','↪'],['Risky Sign-ins (7D)',data.riskySignIns7d,'risk','♜']].map(([title,value,type,glyph])=><div className={`kpi ${type}`} key={title}><div className="kpi-icon">{glyph}</div><div><div className="kpi-title">{title}</div><div className="kpi-value">{fmt(value)}</div><div className="kpi-change"><span>Live Graph query</span></div></div></div>)}</section>
+    <section className="grid top-grid">
+      <Card title="Application Usage Overview" className="usage"><div className="usage-body"><Donut segments={appSegments} total={data.applications} label="Observed Apps"/><div className="legend">{[['Active (≤30 Days)',b.active30,'green'],['Inactive (31–90 Days)',b.inactive31to90,'amber'],['Inactive (91–180 Days)',b.inactive91to180,'orange'],['Inactive (>180 Days)',b.inactive180,'red']].map(([name,v,c])=><div key={name}><i className={c}/>{name}<b>{fmt(v)} <small>{pct(v,data.applications)}</small></b></div>)}</div></div><button className="card-link">All values are calculated from live service-principal activity.</button></Card>
+      <Card title="Applications Not Used > 90 Days"><BarChart items={(data.inactiveApps||[]).slice(0,5).map(x=>({name:x.name,value:x.days==null?0:x.days}))}/><button className="card-link">Top inactive applications by days since last observed activity.</button></Card>
+      <Card title={`Need Attention (${fmt(attentionCount)})`} className="attention-card">{attention.map(item=><div className="attention-item" key={item.title}><div className={`attention-icon ${item.level}`}>{item.level==='critical'?'♜':'▣'}</div><div className="attention-copy"><strong>{item.title}</strong><span>{item.detail}</span></div><b className={item.level}>{fmt(item.value)}</b></div>)}</Card>
+    </section>
+    <section className="grid lower-grid">
+      <Card title="Identity Risk Overview"><div className="risk-body"><Donut segments={[{value:Math.max(0,data.users-(data.riskyUsers||0)),color:'#31b75a'},{value:data.riskyUsers||0,color:'#e85555'}]} total={data.users} label="Users"/><div className="risk-legend"><div><i className="green"/>Not flagged<b>{fmt(Math.max(0,data.users-(data.riskyUsers||0)))} <small>{pct(Math.max(0,data.users-(data.riskyUsers||0)),data.users)}</small></b></div><div><i className="red"/>Risky users<b>{fmt(data.riskyUsers)} <small>{pct(data.riskyUsers,data.users)}</small></b></div></div></div><button className="card-link">Risk values come from ID Protection when permission is granted.</button></Card>
+      <Card title="Sign-in Overview"><div className="chart-head"><span>{fmt(Math.max(...(data.signInTrend||[]).map(x=>x.total||0),0))}</span><span>Peak daily count</span></div><Sparkline points={data.signInTrend||[]}/><div className="chart-labels">{(data.signInTrend||[]).map(x=><span key={x.date}>{new Date(`${x.date}T00:00:00`).toLocaleDateString([], {month:'short',day:'numeric'})}</span>)}</div><div className="series"><span><i className="green"/>Daily sign-in count</span><span><i className="blue"/>Graph query</span></div></Card>
+      <Card title="Identity Health Score"><div className="score"><div className="score-number">{score==null?'—':score}<small>/100</small></div><b>{score==null?'Insufficient data':score>=80?'Good':score>=60?'Needs attention':'At risk'}</b><small>Calculated from live MFA, risk, stale-user and app-hygiene signals.</small></div></Card>
+      <Card title={<><span>AI Recommendations</span><em className="beta">LIVE</em></>} className="ai-card">{[['MFA Adoption',data.mfa?.missing==null?'Permission required':`${fmt(data.mfa.missing)} users are not registered for MFA.`,data.mfa?.missing==null?'Grant permission':'Review MFA gaps','blue'],['Application Cleanup',`${fmt((b.inactive91to180||0)+(b.inactive180||0))} applications show no observed sign-in activity for 90+ days.`,'Review applications','green'],['Stale Accounts',`${fmt(data.staleUsers)} enabled users have no sign-in in the last 90 days.`,'Review stale users','amber'],['Privileged Access',`${fmt(data.privilegedUsers)} unique principals are assigned to detected privileged roles.`,'Review roles','purple']].map(([t,d,btn,c])=><div className="ai-item" key={t}><div className={`ai-icon ${c}`}>✦</div><div className="ai-copy"><strong>{t}</strong><span>{d}</span></div><button>{btn}</button></div>)}</Card>
+    </section>
+    <section className="bottom-grid"><Card title="Recent Activity" className="activity-card"><table><thead><tr><th>Time</th><th>Activity</th><th>Actor</th><th>Target</th><th>Status</th><th>Risk</th></tr></thead><tbody>{(data.recentSignIns||[]).slice(0,8).map((s,i)=>{const ok=s.status?.errorCode===0;return <tr key={s.id||i}><td>{new Date(s.createdDateTime).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}</td><td>{s.isInteractive?'Interactive sign-in':'Sign-in'}</td><td>{s.userDisplayName||s.userPrincipalName||'Service principal'}</td><td>{s.appDisplayName||s.resourceDisplayName||'Microsoft Entra'}</td><td className={ok?'success':'failed'}>{ok?'Success':'Failed'}</td><td className={String(s.riskLevelAggregated||'none').toLowerCase()}>{s.riskLevelAggregated||'none'}</td></tr>})}</tbody></table></Card><Card title="Tenant Evidence"><div className="evidence-list"><div><span>Tenant</span><strong>{data.organization.displayName||'Unknown organization'}</strong></div><div><span>Tenant ID</span><strong className="mono">{data.organization.id||'—'}</strong></div><div><span>Verified domains</span><strong>{data.organization.verifiedDomains?.map(x=>x.name).filter(Boolean).join(', ')||'—'}</strong></div><div><span>Last collection</span><strong>{new Date(data.collectedAt).toLocaleString()}</strong></div><div><span>Conditional Access policies</span><strong>{fmt(data.conditionalAccessPolicies)}</strong></div></div></Card></section>
+  </>;
 }
-function Sparkline() {
-  const pts = '8,74 36,62 64,64 92,55 120,58 148,48 176,60 204,68 232,57 260,70 288,65 316,74 344,55 372,60 400,48';
-  return <svg className="spark" viewBox="0 0 408 92" preserveAspectRatio="none"><polyline points={pts} fill="none" stroke="currentColor" strokeWidth="2.5"/><line x1="0" y1="88" x2="408" y2="88" stroke="rgba(255,255,255,.07)"/><line x1="0" y1="44" x2="408" y2="44" stroke="rgba(255,255,255,.05)"/></svg>;
+
+function ADDashboard({data}){if(!data)return <div className="empty-state large">Active Directory is selected but the agent has not returned a snapshot.</div>;return <><section className="kpis">{[['AD Users',data.userCount,'♙'],['Enabled Users',data.enabledUserCount,'✓'],['Groups',data.groupCount,'♧'],['Computers',data.computerCount,'▱'],['Domain Controllers',data.domainControllerCount,'◆']].map(([t,v,g])=><div className="kpi" key={t}><div className="kpi-icon">{g}</div><div><div className="kpi-title">{t}</div><div className="kpi-value">{fmt(v)}</div><div className="kpi-change"><span>Live AD Agent query</span></div></div></div>)}</section><section className="grid top-grid"><Card title="AD Identity Hygiene"><div className="ad-metrics"><div><b>{fmt(data.disabledUserCount)}</b><span>Disabled users</span></div><div><b>{fmt(data.staleUserCount)}</b><span>Stale enabled users</span></div><div><b>{fmt(data.usersWithoutManager)}</b><span>Users without manager</span></div><div><b>{fmt(data.privilegedUsers)}</b><span>Privileged users</span></div></div></Card><Card title="Computer Hygiene"><div className="ad-metrics"><div><b>{fmt(data.staleComputerCount)}</b><span>Stale computers</span></div><div><b>{fmt(data.computerCount-data.staleComputerCount)}</b><span>Active recent computers</span></div></div></Card><Card title="Domain Controllers"><div className="dc-list">{(data.domainControllers||[]).map(dc=><div key={dc.HostName}><strong>{dc.HostName}</strong><span>{dc.Site||'Default site'} • {dc.IPv4Address||'no IPv4'} {dc.IsReadOnly?'• RODC':''}</span></div>)}</div></Card></section><section className="bottom-grid"><Card title="Active Directory Source"><div className="evidence-list"><div><span>Domain</span><strong>{data.domain}</strong></div><div><span>Forest</span><strong>{data.forest}</strong></div><div><span>Stale threshold</span><strong>{fmt(data.staleDays)} days</strong></div><div><span>Collected</span><strong>{new Date(data.collectedAt).toLocaleString()}</strong></div></div></Card><Card title="Security Boundary"><div className="empty-state">AD data is collected read-only by the local IAM AD Agent. Entra sign-in and ID Protection metrics remain separate until you switch the source back to Microsoft Entra ID.</div></Card></section></>}
+
+function DataSourcesPage({sourceId,onSelect,adStatus}){return <div className="source-page"><div className="source-intro"><div><div className="builder-kicker">DATA SOURCES</div><h2>Identity source control plane</h2><p className="muted">Choose which identity system powers the dashboard. No source is shown as connected unless a live health check succeeds.</p></div></div><div className="source-grid">{DATA_SOURCES.map(s=>{const connected=s.id==='entra'?true:s.id==='ad'?adStatus.connected:false;return <button className={`source-card ${sourceId===s.id?'selected':''}`} key={s.id} onClick={()=>onSelect(s.id)}><div className="source-icon">{s.id==='entra'?'◆':s.id==='ad'?'◇':s.id==='m365'?'▣':s.id==='servicenow'?'◉':'›'}</div><div><strong>{s.name}</strong><span>{s.type}</span><small>{connected?'Connected • Live':s.id==='ad'?'Agent required':'Connector not configured'}</small></div></button>})}</div><div className="agent-box"><h3>Active Directory Agent</h3><p className="muted">Run <span className="mono">agent/IAM-AD-Agent.ps1</span> on a domain-joined Windows host, then set <span className="mono">VITE_AD_AGENT_URL</span>. The dashboard validates <span className="mono">/health</span> before AD data becomes active.</p><div className="agent-status"><Status ok={adStatus.connected} label={adStatus.connected?'Agent online':'Agent unavailable'}/><span>{adStatus.detail}</span></div></div></div>}
+
+function App(){
+  const [active,setActive]=useState('Overview');const [sourceId,setSourceId]=useState(getActiveSource());const [data,setData]=useState(window.__IAM_SNAPSHOT__||null);const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});
+  useEffect(()=>{const h=e=>{setData(e.detail);setLoading(false)};document.addEventListener('iam-live-data',h);return()=>document.removeEventListener('iam-live-data',h)},[]);
+  useEffect(()=>{checkAdAgent().then(setAdStatus)},[]);
+  useEffect(()=>{if(sourceId==='ad'&&adStatus.connected){setLoading(true);getAdSnapshot().then(x=>{setSourceData(x);setLoading(false)}).catch(e=>{setSourceData(null);setLoading(false);setToast(e.message)})}else if(sourceId!=='ad')setSourceData(null)},[sourceId,adStatus.connected]);
+  const refresh=async()=>{setLoading(true);try{if(sourceId==='entra'){const snap=await syncLiveTenantData();setData(snap);setToast('Entra data refreshed')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
+  const chooseSource=id=>{setActiveSource(id);setSourceId(id);setActive('Overview');};
+  const grantSecurity=async()=>{try{setToast('Requesting security permissions…');await connectSecurityScopes();setToast('Consent completed; refreshing security data…');await refresh()}catch(e){setToast(e.message||'Security consent failed')}setTimeout(()=>setToast(''),4000)};
+  const title=sourceId==='entra'?(active==='Overview'?'Executive Overview':active):sourceId==='ad'?(active==='Overview'?'Active Directory Overview':active):sourceById(sourceId).name;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{nav.map(([label,glyph])=>label.startsWith('__')?<div className="section-label" key={label}>{label.slice(2)}</div>:<button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>setActive(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><label className="source-select"><span>Source</span><select value={sourceId} onChange={e=>chooseSource(e.target.value)}>{DATA_SOURCES.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn" onClick={signOut} title="Sign out">⇥</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():'—'}`}</div>{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus}/>:sourceId==='entra'&&data?<EntraDashboard data={data} onSecurity={grantSecurity}/>:sourceId==='ad'?<ADDashboard data={sourceData}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
 }
 
-function App() {
-  const [active, setActive] = useState('Overview');
-  const [days, setDays] = useState('7 Days');
-  const [showBuilder, setShowBuilder] = useState(false);
-  const [selectedAttention, setSelectedAttention] = useState(null);
-  const [lastSync, setLastSync] = useState('38 sec ago');
-  const [toast, setToast] = useState('');
-
-  const navItems = useMemo(() => nav.filter(x => !x[0].startsWith('__')), []);
-  const refresh = () => { setLastSync('just now'); setToast('Dashboard refreshed'); setTimeout(() => setToast(''), 2200); };
-  const action = (text) => { setToast(`${text} opened`); setTimeout(() => setToast(''), 2200); };
-
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-mark"><span>◆</span></div>
-        <div><div className="brand-name">Entra IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div>
-      </div>
-      <nav>{nav.map(([label, glyph], i) => label.startsWith('__') ? <div className="section-label" key={label}>{label.replace('__','')}</div> : <button key={label} className={`nav-item ${active === label ? 'active' : ''}`} onClick={() => setActive(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</nav>
-      <div className="sidebar-footer">Powered by<br/><strong>IAM Intelligence Platform</strong></div>
-    </aside>
-
-    <main className="main">
-      <header className="topbar">
-        <div className="page-title"><span>{active === 'Overview' ? 'Executive Overview' : active}</span><span className="chevron">⌄</span></div>
-        <div className="top-actions">
-          <button className="range" onClick={() => setDays(days === '7 Days' ? '30 Days' : days === '30 Days' ? '90 Days' : '7 Days')}>{days} <span>({days === '7 Days' ? 'May 18 – May 24, 2025' : days === '30 Days' ? 'Apr 25 – May 24, 2025' : 'Feb 24 – May 24, 2025'})</span>⌄</button>
-          <button className="icon-btn" onClick={refresh}>↻</button><button className="icon-btn">⚙</button><button className="filter-btn">⌁ &nbsp; Filters</button>
-        </div>
-      </header>
-
-      <div className="content">
-        <div className="live-row"><span className="live-dot"></span> Tenant: <strong>Contoso</strong><span className="separator">•</span> Synced {lastSync}</div>
-
-        <section className="kpis">
-          {[
-            ['Total Users','24,583','↑ 3.2%','from last 7 days','users'],['Total Applications','812','↑ 5.4%','from last 7 days','apps'],['Active Devices','18,392','↑ 2.1%','from last 7 days','devices'],['Sign-ins (7D)','56,832','↑ 12.6%','from last 7 days','signin'],['Risky Sign-ins','232','↓ -8.7%','from last 7 days','risk']
-          ].map(([title,value,change,sub,type]) => <div className={`kpi ${type}`} key={title}><div className="kpi-icon">{type==='risk'?'♜':type==='signin'?'↪':type==='devices'?'▱':type==='apps'?'▦':'♙'}</div><div><div className="kpi-title">{title}</div><div className="kpi-value">{value}</div><div className="kpi-change">{change} <span>{sub}</span></div></div></div>)}
-        </section>
-
-        <section className="grid top-grid">
-          <Card title="Application Usage Overview" className="usage">
-            <div className="usage-body"><Donut total="812" label="Total Apps"/><div className="legend"><div><i className="green"/>Active (Used in 30 Days)<b>432 <small>(53.2%)</small></b></div><div><i className="amber"/>Inactive (31–90 Days)<b>198 <small>(24.4%)</small></b></div><div><i className="orange"/>Inactive (91–180 Days)<b>112 <small>(13.8%)</small></b></div><div><i className="red"/>Inactive (&gt;180 Days)<b>70 <small>(8.6%)</small></b></div></div></div>
-            <button className="card-link" onClick={() => action('All applications')}>View all applications →</button>
-          </Card>
-
-          <Card title="Applications Not Used" tabs={['30 Days','90 Days','180 Days']}><div className="bar-chart">{[['Microsoft 365',48],['Salesforce',32],['Zoom',28],['ServiceNow',18],['Workday',15]].map(([name,val],i)=><div className="bar-col" key={name}><div className="bar-value">{val}</div><div className={`bar b${i}`} style={{height:`${val*2.2}px`}}></div><span>{name}</span></div>)}</div><button className="card-link" onClick={() => action('Inactive applications')}>View all inactive applications →</button></Card>
-
-          <Card title="Need Attention (12)" actionLabel="View all" onAction={() => action('All attention items')} className="attention-card">
-            {attention.map((item) => <button className="attention-item" key={item.title} onClick={() => setSelectedAttention(item)}><div className={`attention-icon ${item.level}`}>{item.level === 'critical' ? '♜' : item.level === 'warning' ? '▣' : '♙'}</div><div className="attention-copy"><strong>{item.title}</strong><span>{item.detail}</span></div><b className={item.level}>{item.value}</b></button>)}
-          </Card>
-        </section>
-
-        <section className="grid lower-grid">
-          <Card title="User Risk Overview"><div className="risk-body"><Donut total="24,583" label="Total Users"/><div className="risk-legend"><div><i className="green"/>Low Risk <b>22,456 <small>(91.4%)</small></b></div><div><i className="amber"/>Medium Risk <b>1,532 <small>(6.2%)</small></b></div><div><i className="red"/>High Risk <b>595 <small>(2.4%)</small></b></div></div></div><button className="card-link" onClick={() => action('Risk users')}>View risk users →</button></Card>
-          <Card title="Sign-in Overview" tabs={['7 Days','30 Days','90 Days']}><div className="chart-head"><span>30K</span><span>20K</span><span>10K</span><span>0</span></div><Sparkline/><div className="chart-labels"><span>May 18</span><span>May 19</span><span>May 20</span><span>May 21</span><span>May 22</span><span>May 23</span><span>May 24</span></div><div className="series"><span><i className="green"/>Successful</span><span><i className="red"/>Failed</span><span><i className="blue"/>MFA</span></div></Card>
-          <Card title="Identity Health Score"><div className="score"><div className="gauge"><div className="gauge-fill"></div><div className="gauge-center"><strong>87</strong><span>/100</span></div></div><b>Good</b><small>↑ 6 points from last 7 days</small></div></Card>
-          <Card title={<><span>AI Recommendations</span><em className="beta">BETA</em></>} className="ai-card">
-            {[['Potential App Cleanup','46 applications have not been used in 90+ days.','$12,450/year','Review Applications','green'],['Password Hygiene','128 users have expired passwords.','', 'Reset Campaign','amber'],['MFA Adoption','214 users are not using MFA.','', 'Enable MFA','blue'],['Access Review','18 users have excessive admin privileges.','', 'Start Review','purple']].map(([t,d,meta,btn,c])=><div className="ai-item" key={t}><div className={`ai-icon ${c}`}>✦</div><div className="ai-copy"><strong>{t}</strong><span>{d}</span>{meta && <span>{meta}</span>}</div><button onClick={() => action(btn)}>{btn}</button></div>)}
-          </Card>
-        </section>
-
-        <section className="bottom-grid">
-          <Card title="Recent Activity" actionLabel="View all" onAction={() => action('Recent activity')} className="activity-card"><table><thead><tr><th>Time</th><th>Activity</th><th>Actor</th><th>Target</th><th>Status</th><th>Risk</th></tr></thead><tbody>{activities.map((r,i)=><tr key={i}>{r.map((v,j)=><td key={j} className={j===4 ? (v==='Failed'?'failed':'success') : j===5 ? v.toLowerCase() : ''}>{v}</td>)}</tr>)}</tbody></table></Card>
-          <Card title="Data Sources" className="sources-card"><div className="sources">{['◆ Microsoft Entra ID','▣ Microsoft 365','◇ Azure AD Connect','◉ ServiceNow','› Splunk'].map((x,i)=><div key={x}><span>{x}</span><small>Connected</small></div>)}</div><button className="custom-dash" onClick={() => setShowBuilder(true)}>＋ Build custom dashboard</button></Card>
-        </section>
-      </div>
-    </main>
-
-    {selectedAttention && <div className="modal-backdrop" onClick={() => setSelectedAttention(null)}><div className="detail-modal" onClick={e => e.stopPropagation()}><button className="close" onClick={() => setSelectedAttention(null)}>×</button><div className={`modal-severity ${selectedAttention.level}`}>{selectedAttention.level.toUpperCase()}</div><h2>{selectedAttention.title}</h2><p>{selectedAttention.detail}. <strong>{selectedAttention.value}</strong> items currently match this signal.</p><div className="evidence"><h4>AI assessment</h4><p>Prioritize review using recent activity, ownership, privilege level and historical baseline. This is a recommendation for human review—not an automatic destructive action.</p></div><div className="modal-actions"><button onClick={() => action('Investigation')}>Investigate</button><button className="primary" onClick={() => action(selectedAttention.action)}>{selectedAttention.action}</button></div></div></div>}
-
-    {showBuilder && <div className="modal-backdrop" onClick={() => setShowBuilder(false)}><div className="builder" onClick={e => e.stopPropagation()}><button className="close" onClick={() => setShowBuilder(false)}>×</button><div className="builder-kicker">CUSTOM DASHBOARD</div><h2>Build your identity view</h2><p className="muted">Start from a template or create a panel from your connected data.</p><div className="templates">{['Executive Identity Pulse','Application Governance','Privileged Identity','Authentication Health','Provisioning Health','Identity Hygiene'].map(x=><button key={x} onClick={() => action(`${x} template`)}>{x}<span>→</span></button>)}</div><div className="builder-divider"><span>or build a panel</span></div><div className="builder-form"><label>Data source<select><option>Microsoft Entra ID</option></select></label><label>Entity<select><option>Applications</option><option>Users</option><option>Service Principals</option></select></label><label>Signal<select><option>Last sign-in</option><option>Role assignment</option><option>Credential expiration</option></select></label><label>Condition<select><option>More than 90 days</option><option>More than 180 days</option><option>Unusual vs baseline</option></select></label></div><button className="primary full" onClick={() => {setShowBuilder(false); setToast('Custom panel added'); setTimeout(() => setToast(''), 2200)}}>Preview & add panel</button></div></div>}
-    {toast && <div className="toast">✓ {toast}</div>}
-  </div>;
-}
-function Card({ title, children, tabs, actionLabel, onAction, className='' }) { return <div className={`card ${className}`}><div className="card-header"><h3>{title}</h3>{tabs && <div className="tabs">{tabs.map((t,i)=><button key={t} className={i===0?'selected':''}>{t}</button>)}</div>}{actionLabel && <button className="header-action" onClick={onAction}>{actionLabel}</button>}</div>{children}</div> }
-
-createRoot(document.getElementById('root')).render(<App />);
+createRoot(document.getElementById('root')).render(<App/>);
