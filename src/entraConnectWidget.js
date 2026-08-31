@@ -2,6 +2,7 @@ import {
   AUTH_CONFIGURED,
   connectTenant,
   disconnectTenant,
+  getRecentSignIns,
   getTenantSnapshot,
   initializeAuth,
   signIn,
@@ -25,6 +26,7 @@ let connected = false;
 let panelOpen = false;
 let account = null;
 let errorMessage = '';
+let refreshTimer = null;
 
 function fmt(value) {
   if (value === null || value === undefined) return '—';
@@ -63,7 +65,7 @@ function render() {
       </div>
     </div>`;
 
-  document.getElementById('eii-toggle')?.addEventListener('click', () => { panelOpen = !panelOpen; render(); if (connected) loadSnapshot(); });
+  document.getElementById('eii-toggle')?.addEventListener('click', () => { panelOpen = !panelOpen; render(); if (connected) loadLiveData(); });
   document.getElementById('eii-signin')?.addEventListener('click', handleSignIn);
   document.getElementById('eii-connect')?.addEventListener('click', handleConnect);
   document.getElementById('eii-signout')?.addEventListener('click', handleDisconnect);
@@ -75,27 +77,51 @@ function setDashboardValue(index, value) {
   if (values[index] && value !== null) values[index].textContent = fmt(value);
 }
 
-function updateDashboard(snapshot) {
+function updateDashboard(snapshot, signIns) {
   setDashboardValue(0, snapshot.counts.users);
   setDashboardValue(1, snapshot.counts.applications);
   setDashboardValue(2, snapshot.counts.devices);
+  if (signIns?.['@odata.count'] !== undefined) setDashboardValue(3, signIns['@odata.count']);
+
   const live = document.querySelector('.live-row');
   if (live && snapshot.tenant) live.innerHTML = `<span class="live-dot"></span> Tenant: <strong>${escapeHtml(snapshot.tenant.displayName || 'Connected tenant')}</strong><span class="separator">•</span> Live Graph connection`;
   const source = document.querySelector('.sources > div:first-child');
   if (source) source.innerHTML = '<span>◆ Microsoft Entra ID</span><small>Connected · Live</small>';
+
+  if (Array.isArray(signIns?.value)) {
+    const rows = document.querySelectorAll('.activity-card tbody tr');
+    signIns.value.slice(0, 5).forEach((event, index) => {
+      const row = rows[index];
+      if (!row) return;
+      const cells = row.querySelectorAll('td');
+      const time = event.createdDateTime ? new Date(event.createdDateTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
+      const activity = event.status?.errorCode ? 'Failed Sign-in' : 'User Sign-in';
+      const actor = event.userPrincipalName || event.userDisplayName || 'Unknown user';
+      const target = event.appDisplayName || 'Microsoft Entra';
+      const status = event.status?.errorCode ? 'Failed' : 'Success';
+      const risk = event.riskLevelDuringSignIn && event.riskLevelDuringSignIn !== 'none' ? event.riskLevelDuringSignIn : 'Low';
+      [time, activity, actor, target, status, risk].forEach((value, i) => { if (cells[i]) cells[i].textContent = value; });
+    });
+  }
 }
 
-async function loadSnapshot() {
+async function loadLiveData() {
   try {
-    const snapshot = await getTenantSnapshot();
-    updateDashboard(snapshot);
+    const [snapshot, signIns] = await Promise.all([getTenantSnapshot(), getRecentSignIns()]);
+    updateDashboard(snapshot, signIns);
     const map = { applications: 'eii-app-count', users: 'eii-user-count', groups: 'eii-group-count', devices: 'eii-device-count' };
     Object.entries(map).forEach(([key, id]) => { const el = document.getElementById(id); if (el) el.textContent = fmt(snapshot.counts[key]); });
+    errorMessage = '';
   } catch (error) {
     errorMessage = formatAuthError(error);
     render();
     panelOpen = true;
   }
+}
+
+function startRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => { if (connected) loadLiveData(); }, 60000);
 }
 
 async function handleSignIn() {
@@ -123,7 +149,8 @@ async function handleConnect() {
     connected = true;
     panelOpen = true;
     render();
-    await loadSnapshot();
+    await loadLiveData();
+    startRefresh();
   } catch (error) {
     errorMessage = formatAuthError(error);
     panelOpen = true;
@@ -132,9 +159,8 @@ async function handleConnect() {
 }
 
 async function handleDisconnect() {
-  try {
-    await disconnectTenant();
-  } finally {
+  clearInterval(refreshTimer);
+  try { await disconnectTenant(); } finally {
     connected = false;
     account = null;
     errorMessage = '';
