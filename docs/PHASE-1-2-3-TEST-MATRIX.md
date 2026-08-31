@@ -42,6 +42,27 @@ applied to the sign-in trend/KPIs (`signInsAvailable`/`signInsReason`) — a
 tenant without an Entra ID P1/P2 license will see why sign-in data is
 unavailable rather than a bare "No data" or a false zero.
 
+### Added: Toxic Combinations and a Risk Register
+
+New nav sections cross-reference signals already collected (by AAD object
+id) into compound findings instead of five unrelated counts: a privileged
+user who also lacks MFA, is flagged risky by ID Protection, or is stale
+90+ days shows up as one row under **Toxic Combinations**, not scattered
+across three separate cards. Every acknowledged Need Attention or Toxic
+Combination finding now lands in a dedicated **Risk Register** page (still
+`localStorage`-backed, not yet shared across users) instead of only being
+visible transiently on the Overview page.
+
+### Added: adjustable thresholds on Users and Applications detail pages
+
+The Users page's stale-account table and the Applications page's
+credential-expiry highlighting both have a selector (30/60/90/180 days for
+staleness; 15/30/60/90 for credential expiry) computed client-side from data
+already in the snapshot — no extra Graph calls. The Overview KPIs and Need
+Attention counts always use the fixed thresholds (90 days stale, 30 days
+credential expiry) for consistency; the detail-page selectors are for
+investigation, not for changing what counts as "attention-worthy" tenant-wide.
+
 ### Added: per-metric drill-down navigation and Need Attention exceptions
 
 KPI tiles, Need Attention rows, and card footers now navigate to a real
