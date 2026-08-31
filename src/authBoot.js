@@ -1,4 +1,5 @@
 import { initializeAuth, signIn, connectTenant, getRedirectResult, AUTH_CONFIGURED } from './entraAuth.js';
+import { syncLiveTenantData } from './liveTenantData.js';
 import './authBoot.css';
 
 const root = document.getElementById('root');
@@ -32,6 +33,13 @@ function replaceBranding() {
 
 async function loadDashboard(account) {
   release();
+  try {
+    await syncLiveTenantData();
+  } catch (error) {
+    console.error('IAM live Graph sync failed:', error);
+    const live = document.querySelector('.live-row');
+    if (live) live.insertAdjacentText('beforeend', ' • Live sync unavailable');
+  }
   window.dispatchEvent(new CustomEvent('iam-authenticated', { detail: { account } }));
 }
 
@@ -39,8 +47,6 @@ async function handleConnect() {
   const button = document.getElementById('iam-connect');
   if (button) { button.disabled = true; button.textContent = 'Connecting…'; }
   try {
-    // acquireTokenRedirect intentionally navigates away; the success path is
-    // completed by bootstrap() after Microsoft returns to the SPA.
     await connectTenant();
   } catch (error) {
     renderError(error);
@@ -48,7 +54,7 @@ async function handleConnect() {
 }
 
 function renderError(error) {
-  render(`<div class="auth-card error-card"><div class="auth-logo">◆</div><div class="auth-kicker">IAM INTELLIGENCE</div><h1>Connection could not be completed</h1><p>${escapeHtml(error?.message || 'Microsoft authentication failed.')}</p><div class="auth-error">Check that the App Registration is multitenant, the SPA redirect URI is <b>http://localhost:5173</b>, and admin consent has been granted.</div><button class="auth-primary" id="iam-retry">Try again</button></div>`);
+  render(`<div class="auth-card error-card"><div class="auth-logo">◆</div><div class="auth-kicker">IAM INTELLIGENCE</div><h1>Connection could not be completed</h1><p>${escapeHtml(error?.message || 'Microsoft authentication failed.')}</p><div class="auth-error">Check that the App Registration is multitenant, the SPA redirect URI is <b>http://localhost:5173</b>, and the signed-in administrator has the required Microsoft Entra role for audit-log access.</div><button class="auth-primary" id="iam-retry">Try again</button></div>`);
   document.getElementById('iam-retry')?.addEventListener('click', bootstrap);
 }
 
@@ -59,7 +65,7 @@ function renderConnect(account, kicker = 'SIGNED IN') {
 
 async function bootstrap() {
   if (!AUTH_CONFIGURED) {
-    render(`<div class="auth-card"><div class="auth-logo">◆</div><div class="auth-kicker">IAM INTELLIGENCE</div><h1>Configuration required</h1><p>The application client ID is not configured. Run the repository bootstrap script, then restart the app.</p><div class="auth-error">Expected VITE_ENTRA_CLIENT_ID for the IAM Intelligence multitenant SPA.</div></div>`);
+    render(`<div class="auth-card"><div class="auth-logo">◆</div><div class="auth-kicker">IAM INTELLIGENCE</div><h1>Configuration required</h1><p>The application client ID is not configured.</p><div class="auth-error">Expected VITE_ENTRA_CLIENT_ID for the IAM Intelligence multitenant SPA.</div></div>`);
     return;
   }
   try {
@@ -67,14 +73,19 @@ async function bootstrap() {
     const redirectResult = getRedirectResult();
     const pendingConnect = sessionStorage.getItem('iam_connect_pending') === 'true';
 
-    // A successful consent redirect is the completion of Connect Tenant.
-    // Persist the connection only after Microsoft returned a token result.
     if (account && pendingConnect && redirectResult?.accessToken) {
-      sessionStorage.setItem('iam_tenant_connected', 'true');
-      sessionStorage.setItem('iam_tenant_id', account.tenantId || '');
-      sessionStorage.removeItem('iam_connect_pending');
-      await loadDashboard(account);
-      return;
+      try {
+        await syncLiveTenantData();
+        sessionStorage.setItem('iam_tenant_connected', 'true');
+        sessionStorage.setItem('iam_tenant_id', account.tenantId || '');
+        sessionStorage.removeItem('iam_connect_pending');
+        await loadDashboard(account);
+        return;
+      } catch (error) {
+        sessionStorage.removeItem('iam_connect_pending');
+        renderError(error);
+        return;
+      }
     }
 
     const connected = sessionStorage.getItem('iam_tenant_connected') === 'true';
@@ -87,7 +98,7 @@ async function bootstrap() {
     }
 
     if (!connected) {
-      renderConnect(account);
+      renderConnect(account, 'WELCOME BACK');
       return;
     }
 
