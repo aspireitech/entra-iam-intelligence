@@ -134,7 +134,7 @@ export async function getTenantSnapshot() {
 
 export async function getRecentSignIns() {
   const from = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  return graphGet(`/auditLogs/signIns?$filter=createdDateTime ge ${encodeURIComponent(from)}&$top=50&$orderby=createdDateTime desc`);
+  return graphGet(`/auditLogs/signIns?$filter=createdDateTime ge ${encodeURIComponent(from)}&$count=true&$top=50&$orderby=createdDateTime desc`);
 }
 
 export async function getRecentAuditLogs() {
