@@ -30,6 +30,15 @@ Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product hando
 
 **No Microsoft client secret or certificate is ever used in the browser.**
 
+## Setting up a new server, or moving to one
+
+`scripts/bootstrap-server.ps1` / `.sh` sets up the dashboard and, if you
+want, the collector in one pass on a fresh machine (`--with-collector`).
+Moving an existing collector (or recovering from a crash) needs its
+certificate, config, and accumulated history explicitly backed up first —
+none of that is in git, deliberately, since it's secrets/local state. See
+"Moving to a new server" in `collector/README.md`.
+
 ## Run locally
 
 Requirements: Node.js 20+ recommended.

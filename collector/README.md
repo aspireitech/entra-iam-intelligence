@@ -138,6 +138,54 @@ Selecting **All Identity Sources (Combined)** in the dashboard's source
 tabs will then show aggregated KPIs across every configured tenant, a
 per-tenant breakdown, and each tenant's certificate expiry status.
 
+## Moving to a new server (or recovering from a crash)
+
+Nothing the collector needs is stored in this git repo - the certificate,
+`tenants.json`, and `data/history.sqlite` are all `.gitignore`d, deliberately,
+because they're secrets/local state. That means a server crash **without a
+prior backup loses the certificate, config, and every day of accumulated
+trend history** - there is no way to recover that after the fact. Take
+backups proactively, not just at the moment you plan to move.
+
+```bash
+./scripts/backup.sh                    # writes collector/backups/collector-backup-<timestamp>.tar.gz
+```
+```powershell
+.\scripts\backup.ps1
+```
+
+The archive contains the certificate's **private key** — store and transport
+it with the same care as any private key (encrypted storage, restricted
+access, never email/chat).
+
+On the new machine, either restore directly:
+
+```bash
+./scripts/restore.sh /path/to/collector-backup-<timestamp>.tar.gz
+```
+```powershell
+.\scripts\restore.ps1 -Archive 'C:\path\to\collector-backup-<timestamp>.zip'
+```
+
+...or restore as part of a full fresh-server bootstrap (see root
+`scripts/bootstrap-server.ps1`/`.sh`, which also sets up the dashboard):
+
+```bash
+./scripts/bootstrap-server.sh --restore=/path/to/collector-backup-<timestamp>.tar.gz
+```
+
+Restoring keeps the same certificate (same thumbprint), so **no changes are
+needed in the Entra app registration or admin consent** — the new machine
+picks up exactly where the old one left off, history included. Both scripts
+refuse to overwrite an existing `tenants.json`/`certs`/`data` on the target
+machine unless you pass `--force` (`-Force` in PowerShell).
+
+**Setting up a brand-new server with no prior history?** Skip backup/restore
+entirely and use `scripts/bootstrap-server.ps1`/`.sh --with-collector` from
+the repo root — it generates a fresh certificate, scaffolds `tenants.json`,
+and installs dependencies for both the dashboard and the collector in one
+pass.
+
 ## Historical trend and "who registered this app"
 
 Every collection cycle appends a row to `collector/data/history.sqlite`
