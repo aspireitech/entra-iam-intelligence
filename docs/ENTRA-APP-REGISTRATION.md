@@ -39,6 +39,7 @@ Requested separately, only when the operator opts into security intelligence (pr
 | `IdentityRiskyUser.Read.All` | Entra ID Protection risky-user data |
 | `RoleManagement.Read.Directory` | Privileged directory role assignments |
 | `Policy.Read.All` | Conditional Access policy inventory |
+| `Organization.Read.All` | License SKU inventory (`/subscribedSkus`) — requested only when the Licenses page is opened |
 
 `ProvisioningLog.Read.All` is intentionally optional and should be requested only when the Provisioning capability is enabled.
 
