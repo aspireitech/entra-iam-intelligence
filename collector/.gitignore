@@ -1,0 +1,8 @@
+node_modules/
+tenants.json
+data/
+certs/*.pem
+certs/*.key
+certs/*.pfx
+certs/*.crt
+!certs/.gitkeep

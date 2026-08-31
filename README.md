@@ -1,27 +1,31 @@
-# Entra IAM Intelligence
+# IAM Intelligence
 
 **Identity. Secure. Simplified.**
 
-A focused identity operations command center for Microsoft Entra ID. The first experience turns identity telemetry into a small number of meaningful daily decisions: **what changed, what needs attention, why it matters, and what to do next.**
+A vendor-neutral identity intelligence command center. The first production connector is Microsoft Entra ID. The experience turns identity telemetry into a small number of meaningful daily decisions: **what changed, what needs attention, why it matters, and what to do next.**
 
-## v0.1 local prototype
+## Current status: live Microsoft Entra connector
 
-The current build is a browser-based executive command center using realistic demo data. It includes:
+The dashboard is wired to real, delegated Microsoft Graph queries — **there is no demo/mock data in the live app.** When a metric can't be retrieved (missing permission, unsupported API, no data yet) the UI shows `—` or `Permission required` rather than a fabricated value. See `docs/PHASE-1-2-3-TEST-MATRIX.md` for the full scope-by-scope validation matrix.
 
-- Executive Overview
-- Identity health KPIs
-- Application usage and 30/90/180-day inactivity views
-- Need Attention signals
-- User risk overview
-- Sign-in trend
-- Identity Health Score
-- AI recommendation cards
-- Recent activity
-- Data source status
-- Interactive attention details
-- Custom dashboard builder with predefined templates
+Implemented:
 
-The data is intentionally mocked in v0.1. **No Microsoft credentials are stored or required.**
+- Redirect-based MSAL sign-in with silent token reuse and progressive (not forced) consent
+- Live tenant identity (real organization display name and tenant ID, not a placeholder)
+- Executive Overview: users, applications, groups, devices, sign-ins — all from live Graph counts
+- Application usage / inactivity buckets from service-principal sign-in activity (beta endpoint, with graceful fallback)
+- Need Attention signals (MFA gaps, risky users, stale accounts, privileged roles, inactive apps) sourced from live queries, never defaulted to zero on API failure
+- Identity Health Score computed from live MFA/risk/stale-user/app-hygiene signals, not a static number
+- Progressive security-permission consent (ID Protection, privileged roles, Conditional Access) requested separately from core scopes
+- Licenses page: purchased/assigned/available seats per Microsoft 365 SKU, stale-licensed-account detection, reclamation recommendations (`Organization.Read.All`, progressive consent)
+- Application Credential Expiry: tenant app registrations' client secrets/certificates, with a ≤30-day rotation warning
+- Auto-refresh every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s) while the tab is open and signed in
+- Data Sources control plane: Microsoft Entra (live), a read-only Active Directory agent (`agent/IAM-AD-Agent.ps1`), and an optional certificate-authenticated multi-tenant collector (`collector/`, see its README) powering a combined cross-tenant view; SailPoint and Saviynt are listed but not yet built, and are never shown as connected
+- Sign-out clears the MSAL session and local tenant/session state
+
+Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product handoff for the full roadmap): a normalized cross-source entity model, per-metric "how this was calculated" drill-down, a separate tenant Disconnect action, historical trend storage in the collector, and the SailPoint/Saviynt connectors themselves (permission model documented in `docs/PERMISSIONS.md`, not yet built).
+
+**No Microsoft client secret or certificate is ever used in the browser.**
 
 ## Run locally
 
@@ -43,29 +47,11 @@ npm run preview
 
 ## Product direction
 
-The next milestone is the real Microsoft Entra connector:
-
-```text
-Microsoft Entra
-      ↓
-Microsoft Graph (read-only)
-      ↓
-Identity data model
-      ↓
-Change + baseline detection
-      ↓
-Attention engine
-      ↓
-AI explanation / recommendation
-      ↓
-Entra IAM Intelligence
-```
-
-The initial connector will focus on applications/service principals, users/groups, sign-ins, audit activity and provisioning signals. We will keep write/destructive permissions out of the monitoring MVP.
+Next milestones (see the full engineering handoff for detail): a source-agnostic normalized entity model so Entra and Active Directory data share one schema, per-metric calculation drill-down, application governance detail (owners, credential expiry), and additional connectors (Microsoft 365, Okta, SailPoint, CyberArk, ServiceNow, Splunk). Write/destructive Graph permissions stay out of the monitoring MVP.
 
 ## Design source of truth
 
-The approved visual reference is the Entra IAM Intelligence executive dashboard: dark enterprise UI, clean alignment, compact KPI cards, application lifecycle intelligence, Need Attention, AI Recommendations, and operator drill-downs.
+The approved visual reference is the IAM Intelligence executive dashboard: dark enterprise UI, clean alignment, compact KPI cards, application lifecycle intelligence, Need Attention, AI Recommendations, and operator drill-downs.
 
 ## Repository
 

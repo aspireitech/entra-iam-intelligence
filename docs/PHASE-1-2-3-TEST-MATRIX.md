@@ -13,6 +13,11 @@
 | `AuditLog.Read.All` | `/reports/authenticationMethods/userRegistrationDetails` | MFA registered/missing counts load |
 | `AuditLog.Read.All` | `/reports/servicePrincipalSignInActivities` (beta) | Application activity buckets / inactive-app list load when the report endpoint is available |
 | `User.Read.All` | `/users?$expand=manager` | Stale enabled users and users without manager load |
+| `Application.Read.All` | `/applications?$select=id,appId,displayName,keyCredentials,passwordCredentials` | Application Credential Expiry card populates; entries ≤30 days show as a Need Attention finding |
+
+**Sign-in and dashboard landing:** after Microsoft sign-in, the dashboard opens automatically once silent token acquisition succeeds against existing consent — there is no separate "Connect Microsoft Entra" button to click. A short "Opening your dashboard…" screen is expected while this happens. Interactive consent only appears the first time a scope has never been granted for that tenant, or if consent was revoked.
+
+**Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
 **Expected:** no Contoso names, demo users, hard-coded dashboard numbers, or fabricated application names appear.
 
@@ -26,6 +31,17 @@
 | `Policy.Read.All` | `/identity/conditionalAccess/policies` | Conditional Access policy count loads |
 
 Security scopes are requested separately. A missing security permission must not prevent the core dashboard from loading.
+
+## Phase 2 — Licensing
+
+| Scope | Graph operation | Dashboard validation |
+|---|---|---|
+| `Organization.Read.All` | `/subscribedSkus` | License Inventory table populates with purchased/assigned/available per SKU |
+| `User.Read.All` | `/users?$select=...,assignedLicenses,signInActivity` | Stale Licensed Accounts count and drill-down list populate |
+
+The Licenses nav page is gated behind its own "Grant license permissions"
+banner and is never populated with placeholder SKU data — a missing grant
+shows the banner, not zeros.
 
 ## Phase 3 — Source switching
 
@@ -52,24 +68,48 @@ VITE_AD_AGENT_TOKEN=<same-token>
 
 The dashboard checks `/health` before selecting AD as an active live source. The AD snapshot exposes read-only counts for users, groups, computers, domain controllers, stale accounts/computers, users without managers, and privileged-group membership.
 
+### All Identity Sources (Combined) — multi-tenant collector
+
+Run the collector (see `collector/README.md`): certificate-authenticated,
+app-only Graph access, no browser secret. Configure `VITE_COLLECTOR_URL`
+(and `VITE_COLLECTOR_TOKEN` if the collector sets `collectorToken`).
+
+- `/health` reports each configured tenant's certificate expiry
+  (`certExpiresInDays`) — the dashboard's Collector Certificate Health card
+  must flag anything ≤30 days.
+- The combined view aggregates users/applications/groups/devices/risky
+  users/privileged users/credential-expiry across every tenant the
+  collector is configured for, plus a per-tenant breakdown table.
+- If the collector is unreachable, the combined view shows an explicit
+  "collector not reachable" message — never zeros or stale numbers
+  presented as current.
+
 ### Other sources
 
-Microsoft 365, ServiceNow and Splunk are represented in the source control plane but remain `Connector not configured` until their dedicated API connectors are implemented/configured. They are never presented as connected or populated with demo values.
+SailPoint and Saviynt are represented in the source control plane but
+remain `Connector not configured` until their dedicated connectors are
+built (see `docs/PERMISSIONS.md` for the target permission model). They are
+never presented as connected or populated with demo values.
 
 ## Manual acceptance test
 
 1. Start the Vite app.
 2. Sign in with a work/school Microsoft account.
-3. Connect Microsoft Entra.
+3. Confirm the dashboard opens automatically after sign-in (no manual "Connect" click) once consent already exists for that tenant.
 4. Confirm the tenant name is the real organization name, not `Contoso` or `Connected tenant`.
 5. Confirm KPI values match the Entra admin center / Graph Explorer for the same tenant and time window.
-6. Click Refresh and verify `Last refresh` changes and Graph values are re-queried.
-7. Open Data Sources and confirm Entra is live while unconfigured sources are not shown as connected.
-8. Click Sign out. Confirm the app returns to the Microsoft sign-in gate.
-9. Sign in again with another authorized tenant and confirm the tenant name/data change.
-10. Grant the optional security scopes and confirm risky users, privileged users and Conditional Access policy count populate.
-11. Start the AD agent and configure `VITE_AD_AGENT_URL`; switch the source to Active Directory and verify domain/user/group/computer/DC counts match PowerShell.
-12. Stop the AD agent; confirm the source changes to unavailable rather than showing stale/fake data.
+6. Click Refresh and verify `Last refresh` changes and Graph values are re-queried. Then leave the tab open and idle; confirm `Last refresh` advances again on its own after `VITE_REFRESH_INTERVAL_SECONDS` (default 60s).
+7. Click each source tab in the topbar (Microsoft Entra ID, Active Directory, etc.) and confirm the dashboard switches in one click, with unconfigured sources showing "not configured" rather than fake data.
+8. Open Data Sources and confirm Entra is live while unconfigured sources are not shown as connected.
+9. Open Licenses, grant the license permission when prompted, and confirm the SKU table, stale-licensed-account count, and recommendations reflect real `/subscribedSkus` and `/users` data.
+10. Open Overview and confirm the Application Credential Expiry card lists real app registrations with a ≤30-day badge where applicable, matching the Entra admin center's certificates/secrets view for the same app.
+11. Click the labeled "Sign out" button. Confirm the app returns to the Microsoft sign-in gate.
+12. Sign in again with another authorized tenant and confirm the tenant name/data change.
+13. Grant the optional security scopes and confirm risky users, privileged users and Conditional Access policy count populate.
+14. Start the AD agent and configure `VITE_AD_AGENT_URL`; switch the source to Active Directory and verify domain/user/group/computer/DC counts match PowerShell.
+15. Stop the AD agent; confirm the source changes to unavailable rather than showing stale/fake data.
+16. Start the collector against at least two real tenants (each admin-consented per `collector/README.md`), configure `VITE_COLLECTOR_URL`, select "All Identity Sources" and confirm the combined KPIs equal the sum of the two tenants' individual Entra dashboard values, the per-tenant table matches each tenant, and Collector Certificate Health shows the real certificate's remaining days.
+17. Stop the collector; confirm the combined view shows "collector not reachable" rather than the last cached numbers presented as current.
 
 ## Security expectations
 
