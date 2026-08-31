@@ -47,6 +47,8 @@ export async function initializeAuth() {
   return instance.getActiveAccount() || accounts[0] || null;
 }
 
+export function getRedirectResult() { return redirectResult; }
+
 export async function signIn() {
   const instance = getMsal();
   if (!instance) throw new Error('Microsoft Entra authentication is not configured.');
