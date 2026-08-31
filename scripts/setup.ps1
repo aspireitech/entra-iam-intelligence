@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-Write-Host "`n=== Entra IAM Intelligence bootstrap ===" -ForegroundColor Cyan
+Write-Host "`n=== IAM Intelligence bootstrap ===" -ForegroundColor Cyan
 
 function Get-MajorVersion([string]$Version) { return [int](($Version.TrimStart('v').Split('.')[0])) }
 function Require-Command([string]$Name, [string]$InstallHint) {
@@ -22,7 +22,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     winget install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements
     Write-Host "Close and reopen PowerShell if node is still not on PATH." -ForegroundColor Yellow
   } else {
-    throw "Node.js 20+ is required. Run .\scripts\setup.ps1 -InstallNode or install Node.js LTS manually from https://nodejs.org/"
+    throw "Node.js 20+ is required. Run .\scripts\setup.ps1 -InstallNode or install Node.js LTS manually."
   }
 }
 
@@ -42,15 +42,19 @@ Write-Host "Git     : $(git --version)" -ForegroundColor Green
 if (-not (Test-Path "$RepoRoot\package.json")) { throw "package.json was not found. Run from the cloned repository." }
 
 $envFile = Join-Path $RepoRoot '.env.local'
+$defaultClientId = 'ab342dfc-cab4-45f3-acdb-3e49d606f418'
+$defaultAuthority = 'https://login.microsoftonline.com/organizations'
+
 if ($Reconfigure -or -not (Test-Path $envFile)) {
-  Write-Host "`nLocal Entra configuration" -ForegroundColor Yellow
-  Write-Host "Demo mode works without an Entra App Registration." -ForegroundColor DarkGray
-  Write-Host "When ready, enter the client ID for the SPA App Registration used by this local build." -ForegroundColor DarkGray
-  $clientId = Read-Host 'Microsoft Entra SPA Application (client) ID (press Enter for demo mode)'
-  $authority = 'https://login.microsoftonline.com/organizations'
-  @("# Local-only configuration. Never commit this file.", "VITE_ENTRA_CLIENT_ID=$clientId", "VITE_ENTRA_AUTHORITY=$authority") | Set-Content -Path $envFile -Encoding UTF8
-  if ($clientId) { Write-Host '.env.local configured for Entra connection.' -ForegroundColor Green }
-  else { Write-Host 'Demo mode selected. Entra Connect remains disabled.' -ForegroundColor DarkYellow }
+  Write-Host "`nIAM Intelligence Entra configuration" -ForegroundColor Yellow
+  Write-Host "Configured product App Registration: $defaultClientId" -ForegroundColor DarkGray
+  Write-Host "The application will sign users in first and request monitoring permissions only when Connect Tenant is selected." -ForegroundColor DarkGray
+  @(
+    '# Local-only configuration. Never commit this file.'
+    "VITE_ENTRA_CLIENT_ID=$defaultClientId"
+    "VITE_ENTRA_AUTHORITY=$defaultAuthority"
+  ) | Set-Content -Path $envFile -Encoding UTF8
+  Write-Host '.env.local configured for IAM Intelligence.' -ForegroundColor Green
 } else {
   Write-Host '.env.local already exists; keeping it unchanged.' -ForegroundColor Green
 }
