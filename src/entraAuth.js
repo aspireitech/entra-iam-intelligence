@@ -1,6 +1,11 @@
 import { PublicClientApplication, InteractionRequiredAuthError } from '@azure/msal-browser';
 
-const clientId = import.meta.env.VITE_ENTRA_CLIENT_ID;
+// The client ID is a public SPA identifier, not a secret. Keep the environment
+// variable as the preferred override, but use the registered product ID as the
+// local/deployed default so the application does not show a configuration gate
+// when .env.local has not been created yet.
+const DEFAULT_CLIENT_ID = 'ab342dfc-cab4-45f3-acdb-3e49d606f418';
+const clientId = import.meta.env.VITE_ENTRA_CLIENT_ID || DEFAULT_CLIENT_ID;
 const authority = import.meta.env.VITE_ENTRA_AUTHORITY || 'https://login.microsoftonline.com/organizations';
 
 export const AUTH_CONFIGURED = Boolean(clientId);
@@ -52,7 +57,7 @@ export async function initializeAuth() {
 
 export async function signIn() {
   const instance = getMsal();
-  if (!instance) throw new Error('Microsoft Entra authentication is not configured. Add VITE_ENTRA_CLIENT_ID to .env.local.');
+  if (!instance) throw new Error('Microsoft Entra authentication is not configured.');
   await initPromise;
   const result = await instance.loginPopup({ scopes: ['User.Read'] });
   instance.setActiveAccount(result.account);
@@ -61,7 +66,7 @@ export async function signIn() {
 
 export async function connectTenant() {
   const instance = getMsal();
-  if (!instance) throw new Error('Microsoft Entra authentication is not configured. Add VITE_ENTRA_CLIENT_ID to .env.local.');
+  if (!instance) throw new Error('Microsoft Entra authentication is not configured.');
   await initPromise;
   let account = instance.getActiveAccount() || instance.getAllAccounts()[0];
   if (!account) account = await signIn();
@@ -120,38 +125,10 @@ export async function getTenantSnapshot() {
     graphGet('/devices?$count=true&$top=1'),
   ]);
 
-  const account = getSignedInAccount();
   return {
-    tenant: account ? { id: account.tenantId, displayName: account.name || account.username } : null,
-    counts: {
-      applications: applications['@odata.count'] ?? null,
-      users: users['@odata.count'] ?? null,
-      groups: groups['@odata.count'] ?? null,
-      devices: devices['@odata.count'] ?? null,
-    },
+    applications: applications['@odata.count'] ?? 0,
+    users: users['@odata.count'] ?? 0,
+    groups: groups['@odata.count'] ?? 0,
+    devices: devices['@odata.count'] ?? 0,
   };
-}
-
-export async function getRecentSignIns() {
-  const from = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  return graphGet(`/auditLogs/signIns?$filter=createdDateTime ge ${encodeURIComponent(from)}&$count=true&$top=50&$orderby=createdDateTime desc`);
-}
-
-export async function getRecentAuditLogs() {
-  const from = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  return graphGet(`/auditLogs/directoryAudits?$filter=activityDateTime ge ${encodeURIComponent(from)}&$top=50&$orderby=activityDateTime desc`);
-}
-
-export function getSignedInAccount() {
-  if (!msalInstance) return null;
-  return msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0] || null;
-}
-
-export async function disconnectTenant() {
-  const instance = getMsal();
-  if (!instance) return;
-  await initPromise;
-  const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
-  instance.setActiveAccount(null);
-  if (account) await instance.logoutPopup({ account, mainWindowRedirectUri: window.location.origin });
 }
