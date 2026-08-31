@@ -53,3 +53,20 @@ export async function getCombinedSnapshot(){
   if(!response.ok) throw new Error(`Collector returned HTTP ${response.status}`);
   return response.json();
 }
+
+function collectorBase(){return (import.meta.env.VITE_COLLECTOR_URL||'').replace(/\/$/,'');}
+async function collectorGet(path){
+  const base=collectorBase();
+  if(!base) return {ok:false,reason:'Collector not configured (set VITE_COLLECTOR_URL) - no history without it.'};
+  try{
+    const response=await fetch(`${base}${path}`,{headers:{'Accept':'application/json','X-IAM-Collector-Token':import.meta.env.VITE_COLLECTOR_TOKEN||''}});
+    if(!response.ok) return {ok:false,reason:`Collector returned HTTP ${response.status}`};
+    return {ok:true,data:await response.json()};
+  }catch(error){return {ok:false,reason:error.message||'Collector unreachable'};}
+}
+// These read this tenant's own history from the collector - only meaningful if the
+// collector is configured to track this same tenant ID. If it isn't (or isn't
+// running), callers get an explicit reason, never a fabricated trend.
+export const getTenantDelta=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/delta?days=${days}`);
+export const getTenantHistory=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/history?days=${days}`);
+export const getAppEvents=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/app-events?days=${days}`);

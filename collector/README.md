@@ -90,11 +90,11 @@ Edit `tenants.json`:
 ```
 
 - `intervalSeconds` — how often every configured tenant is re-collected.
-  Default/minimum enforced is 900s (15 min) because each collection cycle
-  fires a full round of Graph calls **per tenant**; polling more often than
-  that multiplies risk of hitting Graph report/beta-endpoint throttling
-  across tenants. This is intentionally lower-frequency than the single-tenant
-  browser dashboard's 60s refresh.
+  Default is 900s (15 min); the enforced floor is 300s (5 min) because each
+  collection cycle fires a full round of Graph calls **per tenant**, and
+  polling more often than that multiplies risk of hitting Graph
+  report/beta-endpoint throttling across tenants. This is intentionally
+  lower-frequency than the single-tenant browser dashboard's 60s refresh.
 - A tenant entry can override `clientId`/`certPath`/`certKeyPath` if that
   tenant uses its own app registration/certificate instead of the shared one.
 - `collectorToken` gates the local HTTP API. Set one before exposing this
@@ -103,14 +103,23 @@ Edit `tenants.json`:
 
 ## 4. Run it
 
-```bash
-npm install
-npm start
+```powershell
+.\start.ps1     # Windows
 ```
 
+```bash
+./start.sh      # macOS/Linux
+```
+
+Either script installs dependencies on first run (including `better-sqlite3`
+— it ships a prebuilt binary, no separate SQLite install needed) and then
+starts the collector. Equivalent to running `npm install && npm start`
+directly.
+
 The collector runs one collection pass immediately, then on the configured
-interval. It listens on `127.0.0.1:8766` by default (`/health`, `/tenants`,
-`/tenants/:id/snapshot`, `/combined`).
+interval. It listens on `127.0.0.1:8766` by default: `/health`, `/tenants`,
+`/tenants/:id/snapshot`, `/tenants/:id/history?days=N`,
+`/tenants/:id/delta?days=N`, `/tenants/:id/app-events?days=N`, `/combined`.
 
 Run it as a persistent process the same way you'd run the AD agent — a
 Windows service (e.g. via NSSM or Task Scheduler "at startup"), a systemd
@@ -129,17 +138,41 @@ Selecting **All Identity Sources (Combined)** in the dashboard's source
 tabs will then show aggregated KPIs across every configured tenant, a
 per-tenant breakdown, and each tenant's certificate expiry status.
 
-## What this first version does and doesn't do
+## Historical trend and "who registered this app"
+
+Every collection cycle appends a row to `collector/data/history.sqlite`
+(`snapshots` table) instead of overwriting the last one — this is what
+makes trend/delta queries possible at all; the single-tenant browser
+dashboard has no persistent process and cannot do this on its own.
+
+- `GET /tenants/:id/history?days=30` — every collected snapshot's key
+  metrics in the window, oldest first.
+- `GET /tenants/:id/delta?days=30` — first-vs-latest comparison in the
+  window (`{from, to, change, pct}` per metric). Returns
+  `{available:false}` rather than a fabricated percentage when there are
+  fewer than two data points yet.
+
+Separately, each cycle also queries
+`/auditLogs/directoryAudits?$filter=activityDisplayName eq 'Add application'`
+(no new permission — this is covered by `AuditLog.Read.All`, already
+requested) and stores new-application events in the `app_events` table.
+`GET /tenants/:id/app-events?days=30` returns them with an `actor_type` of
+`user` or `application`: a human interactively registered it (portal, CLI,
+PowerShell) vs. an automation using its own credential (CI/CD, Terraform, a
+script). When the acting application has a display name it's included as
+`actor_name` — often enough to identify the actual source. Graph does not
+expose a finer-grained "manual vs. Postman vs. internal tool" label than
+this; nothing here claims more precision than that.
+
+## What this version does and doesn't do
 
 Implemented: users/applications/groups/devices/sign-in counts, risky users,
 privileged-role assignments, Conditional Access policy count, stale-user
 count, MFA registration gap, license SKU inventory + stale-licensed-account
-count, application credential (secret/certificate) expiry — the same
-metrics the single-tenant delegated dashboard shows, collected instead via
-app-only permissions on a schedule.
+count, application credential (secret/certificate) expiry, append-only
+historical trend/delta, and new-application actor tracking.
 
-Not yet implemented: historical trend storage (each tenant's snapshot file
-holds only the latest collection — no 30/90/180-day time series yet),
-sign-in trend/recent-activity detail, a real database (snapshots are plain
-JSON files in `collector/data/`, which is fine for a handful of tenants but
-should become a real store before this scales much further).
+Not yet implemented: sign-in trend/recent-activity history (only the point
+counts are stored, not the full sign-in log), and a shared/multi-user Risk
+Register (the SPA's exception register is still browser-local `localStorage`
+— extending it into this database is a natural next step, not yet done).

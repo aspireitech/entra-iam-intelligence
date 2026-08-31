@@ -23,6 +23,34 @@ async function graphGetOptional(token, path, version) {
   }
 }
 
+// Who/what registered new applications, from directory audit logs - not a fabricated
+// "manual vs API vs internal tool" label, which Graph doesn't provide. The real,
+// defensible signal is the actor type: a human user (interactive sign-in - portal,
+// CLI, PowerShell run by a person) vs. an application/service principal (automation
+// using its own credential). When the acting app has a display name, it's shown, and
+// is often enough to identify the actual source (a Terraform/CI service principal, etc).
+export async function fetchAppCreationEvents(tenant, config, sinceIso) {
+  const token = await getAppToken(tenant, config);
+  const filter = `activityDisplayName eq 'Add application' and activityDateTime ge ${sinceIso}`;
+  const result = await graphGetOptional(token, `/auditLogs/directoryAudits?$filter=${encodeURIComponent(filter)}&$top=200&$orderby=activityDateTime desc`);
+  if (!result.ok) return { ok: false, error: result.error, events: [] };
+  const events = (result.data.value || []).map((a) => {
+    const target = (a.targetResources || [])[0] || {};
+    const actorType = a.initiatedBy?.app ? 'application' : a.initiatedBy?.user ? 'user' : 'unknown';
+    const actorName = a.initiatedBy?.app?.displayName || a.initiatedBy?.user?.userPrincipalName || a.initiatedBy?.user?.displayName || null;
+    return {
+      audit_id: a.id,
+      app_id: target.id || null,
+      app_name: target.displayName || null,
+      event_type: 'created',
+      actor_type: actorType,
+      actor_name: actorName,
+      activity_datetime: a.activityDateTime,
+    };
+  });
+  return { ok: true, events };
+}
+
 // Application-permission collection for one tenant. Field shapes intentionally mirror
 // src/entraAuth.js getTenantSnapshot()/getLicenseSnapshot() in the SPA so a combined
 // view and a single-tenant delegated view can eventually share rendering code.

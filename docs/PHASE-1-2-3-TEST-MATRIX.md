@@ -19,6 +19,26 @@
 
 **Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
+### Added: historical trend, delta, and app-registration source tracking (collector)
+
+The collector now appends a row per poll to `collector/data/history.sqlite`
+instead of only overwriting the latest JSON snapshot, and separately tracks
+`/auditLogs/directoryAudits` "Add application" events. New endpoints:
+`/tenants/:id/history`, `/tenants/:id/delta`, `/tenants/:id/app-events`. The
+Applications page's new Growth Trend and Recently Registered Applications
+cards read these — both require the collector to be running and tracking
+the currently-viewed tenant's ID; otherwise they say so explicitly. See
+`docs/ARCHITECTURE.md` §2 for the full data-flow diagrams and `collector/README.md`
+for what "actor: user vs. application" does and doesn't tell you about an
+app registration's source.
+
+### Fixed: Identity Health Score label color didn't match severity
+
+The "Good"/"Needs attention"/"At risk" label under the Health Score was
+hardcoded green in CSS regardless of the actual score - a 10/100 "At risk"
+score rendered in the same green as an 85/100 "Good" one. Now conditional
+on the score band (`good`/`warn`/`bad`/`unknown` classes).
+
 ### Fixed: application-population mismatch (first real-tenant test finding)
 
 `/reports/servicePrincipalSignInActivities` returns every service principal in
