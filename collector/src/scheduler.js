@@ -10,7 +10,8 @@ export function startScheduler(config) {
         saveSnapshot(tenant.id, snapshot);
         appendSnapshot(tenant.id, snapshot);
         const failures = snapshot.permissionFailures.length;
-        console.log(`[collector] ${snapshot.displayName} collected at ${snapshot.collectedAt}${failures ? ` (${failures} query failures - see permissionFailures)` : ''}`);
+        console.log(`[collector] ${snapshot.displayName} collected at ${snapshot.collectedAt}${failures ? ` (${failures} query failure${failures === 1 ? '' : 's'})` : ''}`);
+        for (const reason of snapshot.permissionFailures) console.log(`[collector]   - ${reason}`);
       } catch (error) {
         console.error(`[collector] ${tenant.displayName || tenant.id} collection failed:`, error.message);
       }
