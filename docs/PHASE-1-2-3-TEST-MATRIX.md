@@ -19,6 +19,24 @@
 
 **Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
+### Fixed: Privileged Users / Toxic Combinations silently broken by an invalid $top value (fourth real-tenant test finding)
+
+First real-tenant collector run surfaced `Microsoft Graph 400: Invalid page
+size specified: '999'. Must be between 1 and 500 inclusive.` -
+`/roleManagement/directory/roleAssignments` and
+`/roleManagement/directory/roleDefinitions` cap `$top` at 500, unlike the
+999 most other Graph list endpoints (users, applications, groups, devices)
+allow. Fixed in both `collector/src/graph.js` and the browser SPA's
+`src/entraAuth.js` - the identical `$top=999` was present in both. This
+means **Privileged Users and Toxic Combinations had likely been silently
+unavailable even after the correct `RoleManagement.Read.Directory`
+permission was granted** - not a permission problem, a page-size bug.
+`graphGetOptional` correctly degraded to "permission required" rather than
+showing a false zero, but the actual cause was invisible until the
+collector's error logging (previous fix) started printing the raw Graph
+error text, which now also includes the failing endpoint path for faster
+diagnosis next time.
+
 ### Fixed: certificate generation required openssl, which some Windows machines don't have (third real-tenant test finding)
 
 `scripts/bootstrap-server.ps1`'s openssl-not-on-PATH fallback (checking Git

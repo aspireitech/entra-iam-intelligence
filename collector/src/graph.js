@@ -8,7 +8,7 @@ async function graphGet(token, path, version = 'v1.0') {
   });
   if (!response.ok) {
     const body = await response.text();
-    const error = new Error(`Microsoft Graph ${response.status}: ${body}`);
+    const error = new Error(`Microsoft Graph ${response.status} on ${path}: ${body}`);
     error.status = response.status;
     throw error;
   }
@@ -71,8 +71,10 @@ export async function collectTenant(tenant, config) {
   ]);
 
   const riskyUsers = await graphGetOptional(token, '/identityProtection/riskyUsers?$top=999');
-  const roleAssignments = await graphGetOptional(token, '/roleManagement/directory/roleAssignments?$top=999');
-  const roleDefinitions = await graphGetOptional(token, '/roleManagement/directory/roleDefinitions?$top=999&$filter=isBuiltIn eq true');
+  // /roleManagement/directory/* caps $top at 500, unlike the 999 most other
+  // Graph list endpoints (users, applications, groups, devices) allow.
+  const roleAssignments = await graphGetOptional(token, '/roleManagement/directory/roleAssignments?$top=500');
+  const roleDefinitions = await graphGetOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true');
   const conditionalAccess = await graphGetOptional(token, '/identity/conditionalAccess/policies?$top=999');
   const subscribedSkus = await graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits');
   const appCredentials = await graphGetOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials');
