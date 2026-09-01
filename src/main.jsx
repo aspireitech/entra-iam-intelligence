@@ -8,20 +8,27 @@ import {syncLiveTenantData} from './liveTenantData.js';
 const NAV_GROUPS=[
   {section:null,items:[['Overview','⌂']]},
   {section:'Directory',items:[['Users','♙'],['Groups','♧'],['Devices','▱'],['Applications','▦']]},
-  {section:'Identity Risk',items:[['Risk Overview','◈'],['Toxic Combinations','☠'],['Sign-ins','↪'],['Conditional Access','◌']]},
-  {section:'Governance',items:[['Risk Register','▤'],['Licenses','◫']]},
-  {section:'Admin',items:[['Data Sources','◈']]},
+  {section:'Identity Risk',items:[['Risk Overview','◈'],['Toxic Combinations','☠'],['Sign-ins','↪'],['Conditional Access','◌'],['Alerts','⚑']]},
+  {section:'Governance',items:[['Risk Register','▤'],['Licenses','◫'],['Access Reviews','◐'],['Provisioning','⇄']]},
+  {section:'Admin',items:[['Audit Logs','▥'],['Reports','▧'],['Workflows','⚙'],['Data Explorer','⌕'],['Data Sources','◈'],['Settings','⚒']]},
 ];
-// Which nav labels have a real, working detail view for each source today.
-// Everything else is intentionally hidden rather than silently rendering the
-// Overview page again, or shown elsewhere as "not built yet".
+// Labels rendered in the sidebar but with no working detail view yet - shown as
+// a "Coming soon" placeholder on click instead of being hidden outright, so the
+// roadmap is visible rather than making it look like functionality disappeared.
+const PLACEHOLDER_LABELS=new Set(['Access Reviews','Provisioning','Audit Logs','Alerts','Workflows','Reports','Data Explorer','Settings']);
+// Which nav labels appear for each source today. Working views plus the
+// placeholder labels above (placeholders only make sense once real Entra
+// data is flowing, so they're scoped to the entra source).
 const NAV_BY_SOURCE={
-  entra:['Overview','Users','Groups','Devices','Applications','Risk Overview','Toxic Combinations','Sign-ins','Conditional Access','Risk Register','Licenses','Data Sources'],
+  entra:['Overview','Users','Groups','Devices','Applications','Risk Overview','Toxic Combinations','Sign-ins','Conditional Access','Risk Register','Licenses','Data Sources',...PLACEHOLDER_LABELS],
   ad:['Overview','Data Sources'],
   combined:['Overview','Data Sources'],
   sailpoint:['Data Sources'],
   saviynt:['Data Sources'],
 };
+function ComingSoonPage({label}){
+  return <div className="source-page"><section className="grid top-grid single"><Card title={label}><div className="empty-state large">{label} isn't built yet. It's on the roadmap - this entry stays visible so the plan is transparent rather than hiding the gap.</div></Card></section></div>;
+}
 const REFRESH_SECONDS=Math.max(30,Number(import.meta.env.VITE_REFRESH_INTERVAL_SECONDS)||60);
 const fmt=n=>n==null?'—':Number(n).toLocaleString();
 const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
@@ -250,6 +257,7 @@ function App(){
     else if(active==='Conditional Access')entraContent=<ConditionalAccessDetailPage data={data} onSecurity={grantSecurity}/>;
     else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data}/>;
     else if(active==='Risk Register')entraContent=<RiskRegisterPage/>;
+    else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
     else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav}/>;
   }
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={signOut}><span>⇥</span>Sign out</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>Auto-refresh every {REFRESH_SECONDS}s</>}</div>{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
