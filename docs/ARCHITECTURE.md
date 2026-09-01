@@ -169,6 +169,7 @@ collector/                 Optional Node service (cert auth, app-only)
 agent/IAM-AD-Agent.ps1     Optional PowerShell service for on-prem Active Directory
 
 scripts/bootstrap-server.ps1/.sh   Fresh-server setup: dashboard + optional collector
+collector/scripts/generate-cert.js  Pure-JS certificate generation (no openssl needed)
 collector/scripts/backup.ps1/.sh    Archives cert + tenants.json + SQLite history
 collector/scripts/restore.ps1/.sh    Restores that archive onto a (new) machine
 ```

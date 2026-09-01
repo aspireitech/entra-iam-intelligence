@@ -38,16 +38,25 @@ See `docs/PERMISSIONS.md` for the exact application-permission list.
 ## 1. Generate the certificate
 
 ```bash
+npm install               # first time only
+node scripts/generate-cert.js
+```
+
+No `openssl` needed — this generates the certificate in pure JavaScript
+(the `selfsigned` package), so it works the same on Windows, macOS, and
+Linux with nothing installed beyond Node itself. (`scripts/bootstrap-server.ps1`/`.sh
+--with-collector`, from the repo root, runs this for you automatically.)
+Verified end-to-end against real Azure AD: a certificate generated this way
+successfully authenticates an app-only token request, identically to one
+generated with `openssl`.
+
+Prefer `openssl` anyway? That still works:
+
+```bash
 openssl req -x509 -newkey rsa:2048 -keyout collector/certs/collector.key \
   -out collector/certs/collector.pem -days 730 -nodes \
   -subj "/CN=IAM Intelligence Collector"
 ```
-
-(`scripts/bootstrap-server.ps1`/`.sh --with-collector` runs this for you
-automatically if it can find `openssl`. On Windows, if it's not on `PATH`,
-open a **Git Bash** terminal instead of PowerShell — Git for Windows bundles
-`openssl.exe`, just not always on `PATH` in a regular PowerShell/cmd
-session.)
 
 This produces a certificate valid for 730 days (2 years). Set a calendar
 reminder well before that — the collector's own `/health` endpoint reports

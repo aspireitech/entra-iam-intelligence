@@ -41,42 +41,24 @@ Write-Host "`n--- Collector ---" -ForegroundColor Yellow
 $CollectorRoot = Join-Path $RepoRoot 'collector'
 Set-Location $CollectorRoot
 
+Write-Host "Installing collector dependencies..." -ForegroundColor Cyan
+npm install
+
 if ($RestoreFromBackup) {
   if (-not $BackupArchive) { throw "-RestoreFromBackup requires -BackupArchive <path>." }
   Write-Host "Restoring collector state (certs, tenants.json, history) from backup..." -ForegroundColor Cyan
   & "$CollectorRoot\scripts\restore.ps1" -Archive $BackupArchive
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
-  # Fresh install: generate a certificate if one doesn't already exist.
+  # Fresh install: generate a certificate if one doesn't already exist. Pure
+  # JavaScript (no openssl, no Visual Studio) - see scripts/generate-cert.js.
   $certPem = Join-Path $CollectorRoot 'certs\collector.pem'
   if (-not (Test-Path $certPem)) {
-    $opensslCmd = $null
-    if (Get-Command openssl -ErrorAction SilentlyContinue) {
-      $opensslCmd = 'openssl'
-    } else {
-      # Not on PATH doesn't mean not installed - Git for Windows bundles openssl.exe
-      # but its installer doesn't always add it to PATH. Check the well-known locations
-      # before telling the user to install anything extra.
-      $candidates = @(
-        (Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Git\usr\bin\openssl.exe')
-      ) | Where-Object { $_ -and (Test-Path $_) }
-      if ($candidates) { $opensslCmd = $candidates[0] }
-    }
-
-    if ($opensslCmd) {
-      Write-Host "Generating a new certificate (collector/certs/collector.pem + .key) using $opensslCmd..." -ForegroundColor Cyan
-      New-Item -ItemType Directory -Force -Path (Join-Path $CollectorRoot 'certs') | Out-Null
-      & $opensslCmd req -x509 -newkey rsa:2048 -keyout (Join-Path $CollectorRoot 'certs\collector.key') `
-        -out $certPem -days 730 -nodes -subj "/CN=IAM Intelligence Collector"
-      Write-Host "Certificate generated. You still need to upload the PUBLIC key (collector/certs/collector.pem)" -ForegroundColor Yellow
-      Write-Host "to the Entra app registration's Certificates & secrets blade and grant admin consent - see collector/README.md." -ForegroundColor Yellow
-    } else {
-      Write-Host "openssl not found on PATH or in Git for Windows' bundled location." -ForegroundColor Red
-      Write-Host "Easiest fix: open a 'Git Bash' terminal (Start menu, if Git for Windows is installed) and run:" -ForegroundColor Red
-      Write-Host "  openssl req -x509 -newkey rsa:2048 -keyout collector/certs/collector.key -out collector/certs/collector.pem -days 730 -nodes -subj `"/CN=IAM Intelligence Collector`"" -ForegroundColor Yellow
-      Write-Host "Then re-run this script, or just run '.\collector\start.ps1' once the certificate exists." -ForegroundColor Red
-    }
+    Write-Host "Generating a new certificate (collector/certs/collector.pem + .key)..." -ForegroundColor Cyan
+    node (Join-Path $CollectorRoot 'scripts\generate-cert.js')
+    if ($LASTEXITCODE -ne 0) { throw "Certificate generation failed - see the error above." }
+    Write-Host "Certificate generated. You still need to upload the PUBLIC key (collector/certs/collector.pem)" -ForegroundColor Yellow
+    Write-Host "to the Entra app registration's Certificates & secrets blade and grant admin consent - see collector/README.md." -ForegroundColor Yellow
   } else {
     Write-Host "Certificate already present - leaving it as is." -ForegroundColor Green
   }
@@ -89,9 +71,6 @@ if ($RestoreFromBackup) {
     Write-Host "collector/tenants.json already present - leaving it as is." -ForegroundColor Green
   }
 }
-
-Write-Host "Installing collector dependencies (includes better-sqlite3, prebuilt binary)..." -ForegroundColor Cyan
-npm install
 
 Write-Host "`n=== Bootstrap complete ===" -ForegroundColor Green
 Write-Host "Dashboard:  .\scripts\start.ps1          (from $RepoRoot)" -ForegroundColor Cyan
