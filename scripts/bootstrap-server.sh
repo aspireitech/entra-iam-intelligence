@@ -48,21 +48,19 @@ echo "--- Collector ---"
 COLLECTOR_ROOT="$REPO_ROOT/collector"
 cd "$COLLECTOR_ROOT"
 
+echo "Installing collector dependencies..."
+npm install
+
 if [ -n "$RESTORE_ARCHIVE" ]; then
   echo "Restoring collector state (certs, tenants.json, history) from backup..."
   bash "$COLLECTOR_ROOT/scripts/restore.sh" "$RESTORE_ARCHIVE"
 else
   if [ ! -f "certs/collector.pem" ]; then
-    if command -v openssl >/dev/null 2>&1; then
-      echo "Generating a new certificate (collector/certs/collector.pem + .key)..."
-      mkdir -p certs
-      openssl req -x509 -newkey rsa:2048 -keyout certs/collector.key \
-        -out certs/collector.pem -days 730 -nodes -subj "/CN=IAM Intelligence Collector"
-      echo "Certificate generated. You still need to upload the PUBLIC key (collector/certs/collector.pem)"
-      echo "to the Entra app registration's Certificates & secrets blade and grant admin consent - see collector/README.md."
-    else
-      echo "openssl not found on PATH. Install it, or generate the certificate manually per collector/README.md."
-    fi
+    # Pure JavaScript (no openssl, no Visual Studio) - see scripts/generate-cert.js.
+    echo "Generating a new certificate (collector/certs/collector.pem + .key)..."
+    node scripts/generate-cert.js
+    echo "Certificate generated. You still need to upload the PUBLIC key (collector/certs/collector.pem)"
+    echo "to the Entra app registration's Certificates & secrets blade and grant admin consent - see collector/README.md."
   else
     echo "Certificate already present - leaving it as is."
   fi
@@ -74,9 +72,6 @@ else
     echo "collector/tenants.json already present - leaving it as is."
   fi
 fi
-
-echo "Installing collector dependencies (includes better-sqlite3, prebuilt binary)..."
-npm install
 
 echo ""
 echo "=== Bootstrap complete ==="

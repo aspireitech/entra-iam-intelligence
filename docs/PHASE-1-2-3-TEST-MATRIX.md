@@ -19,6 +19,22 @@
 
 **Auto-refresh:** while the Microsoft Entra source is active and the tab is visible, the dashboard re-queries Graph every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s, minimum 30s) without user action. This does not collect data when no browser tab is open and signed in — see `docs/PERMISSIONS.md` for why continuous unattended collection needs a backend collector, not the current SPA-only architecture.
 
+### Fixed: certificate generation required openssl, which some Windows machines don't have (third real-tenant test finding)
+
+`scripts/bootstrap-server.ps1`'s openssl-not-on-PATH fallback (checking Git
+for Windows' bundled location) still came up empty on a machine without a
+full Git for Windows install. Added `collector/scripts/generate-cert.js` -
+generates the same certificate + private key in pure JavaScript (the
+`selfsigned` package, no native compilation), so it works with nothing but
+Node itself, identically on Windows/macOS/Linux. Verified end-to-end: a
+certificate generated this way successfully authenticates a real app-only
+token request against Azure AD (same `AADSTS900021` response for a
+placeholder tenant ID as an openssl-generated certificate, confirming Azure
+AD accepted the signed request rather than rejecting the certificate
+itself). `bootstrap-server.ps1`/`.sh` now use this by default; the openssl
+one-liner in `collector/README.md` remains as an alternative for anyone who
+prefers it.
+
 ### Fixed: collector `npm install` failed on Windows without Visual Studio (second real-tenant test finding)
 
 `better-sqlite3` requires compiling a native C++ addon via `node-gyp` when no
