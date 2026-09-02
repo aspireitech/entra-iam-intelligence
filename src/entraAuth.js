@@ -39,15 +39,32 @@ function computeCredentialExpiry(apps){const now=Date.now();const items=[];for(c
 // Microsoft first-party ones (Graph, Exchange Online, Teams, ...) that were
 // never part of "Total Applications" - bucketing the unfiltered report against
 // that smaller count produced bucket totals and percentages far above 100%.
+// Microsoft Graph's Reports API (userRegistrationDetails, servicePrincipalSignInActivities)
+// throttles far tighter than general directory endpoints - 100 requests/10min (JSON) per
+// app per tenant, vs. 8,000 resource units/10sec for /users, /applications etc. Paginating
+// either report at large-tenant scale (~30 requests for 30k users at $top=999) already uses
+// a third of that 10-minute budget in one snapshot. That's fine at the collector's 5-minute
+// poll floor, but the direct-Graph fallback's 30s auto-refresh would refetch it 20x in that
+// same 10 minutes if not cached - so cache these two specifically, independent of how often
+// the rest of the snapshot refreshes.
+const reportCache=new Map();
+const REPORTS_CACHE_TTL_MS=5*60*1000;
+async function cachedReportFetch(key,fetchFn){
+  const cached=reportCache.get(key);
+  if(cached&&Date.now()-cached.at<REPORTS_CACHE_TTL_MS)return cached.result;
+  const result=await fetchFn();
+  reportCache.set(key,{result,at:Date.now()});
+  return result;
+}
 function bucketAppActivity(ownApps,activityRecords){const now=Date.now();const cutoff=d=>now-d*86400000;const activityByAppId=new Map((activityRecords||[]).map(a=>[a.appId,a]));const buckets={active30:0,inactive31to90:0,inactive91to180:0,inactive180:0};const inactiveApps=[];const all=[];for(const app of ownApps){const activity=activityByAppId.get(app.appId);const ts=activity?lastActivity(activity):0;const name=app.displayName||app.appId||'Unnamed application';const days=ts?Math.floor((now-ts)/86400000):null;let bucket;if(!ts||ts<cutoff(180)){buckets.inactive180++;bucket='180+';inactiveApps.push({name,appId:app.appId,days});}else if(ts<cutoff(90)){buckets.inactive91to180++;bucket='91-180';inactiveApps.push({name,appId:app.appId,days});}else if(ts<cutoff(30)){buckets.inactive31to90++;bucket='31-90';inactiveApps.push({name,appId:app.appId,days});}else{buckets.active30++;bucket='active';}all.push({name,appId:app.appId,days,bucket});}inactiveApps.sort((a,b)=>(b.days??99999)-(a.days??99999));all.sort((a,b)=>(b.days??99999)-(a.days??99999));return{buckets,inactiveApps:inactiveApps.slice(0,25),all};}
 export async function getTenantSnapshot(){
  const collectedAt=new Date().toISOString();const sevenDaysAgo=new Date(Date.now()-7*86400000).toISOString();const permissions=CORE_SCOPES.map(name=>({name,status:'granted',detail:'Requested by core dashboard token'}));
- const core=await Promise.allSettled([graphGet('/organization?$select=id,displayName,verifiedDomains'),graphGet('/applications?$count=true&$top=1'),graphGet('/users?$count=true&$top=1'),graphGet('/groups?$count=true&$top=1'),graphGet('/devices?$count=true&$top=1'),graphGet(`/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),graphGet(`/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`),graphGet('/auditLogs/signIns?$top=50&$orderby=createdDateTime desc'),graphGetAllPages('/reports/authenticationMethods/userRegistrationDetails?$top=999'),graphGetAllPages('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity'),graphGetAllPages('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled&$expand=manager($select=id,displayName,userPrincipalName)'),graphGetAllPages('/devices?$top=999&$select=id,displayName,operatingSystem,operatingSystemVersion,trustType,isCompliant,accountEnabled,approximateLastSignInDateTime')]);
+ const core=await Promise.allSettled([graphGet('/organization?$select=id,displayName,verifiedDomains'),graphGet('/applications?$count=true&$top=1'),graphGet('/users?$count=true&$top=1'),graphGet('/groups?$count=true&$top=1'),graphGet('/devices?$count=true&$top=1'),graphGet(`/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),graphGet(`/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`),graphGet('/auditLogs/signIns?$top=50&$orderby=createdDateTime desc'),cachedReportFetch('registration',()=>graphGetAllPages('/reports/authenticationMethods/userRegistrationDetails?$top=999')),graphGetAllPages('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity'),graphGetAllPages('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled&$expand=manager($select=id,displayName,userPrincipalName)'),graphGetAllPages('/devices?$top=999&$select=id,displayName,operatingSystem,operatingSystemVersion,trustType,isCompliant,accountEnabled,approximateLastSignInDateTime')]);
  const val=(i,f)=>core[i]?.status==='fulfilled'?core[i].value:f;const org=val(0,{value:[]})?.value?.[0]||{};const applications=val(1,{})?.['@odata.count']??null;const users=val(2,{})?.['@odata.count']??null;const groups=val(3,{})?.['@odata.count']??null;const devices=val(4,{})?.['@odata.count']??null;const signIns7d=val(5,{})?.['@odata.count']??null;const riskySignIns7d=val(6,{})?.['@odata.count']??null;const recentSignIns=val(7,{})?.value||[];const registration=val(8,{})?.value||[];const userActivityRecords=val(9,{})?.value||[];const managerRecords=val(10,{})?.value||[];const deviceRecords=val(11,{})?.value||[];
  const reasonForIndex=i=>core[i]?.status==='rejected'?String(core[i].reason?.message||core[i].reason):null;
  const [appCredentials,activityResult,servicePrincipalCount,managedIdentityCount]=await Promise.all([
    graphGetAllPagesOptional('/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials&$expand=owners($select=id)',CORE_SCOPES),
-   graphGetAllPagesOptional('/reports/servicePrincipalSignInActivities?$top=999',CORE_SCOPES,'beta'),
+   cachedReportFetch('activity',()=>graphGetAllPagesOptional('/reports/servicePrincipalSignInActivities?$top=999',CORE_SCOPES,'beta')),
    graphGetOptional('/servicePrincipals?$count=true&$top=1',CORE_SCOPES),
    graphGetOptional(`/servicePrincipals?$count=true&$top=1&$filter=${encodeURIComponent(`servicePrincipalType eq 'ManagedIdentity'`)}`,CORE_SCOPES),
  ]);
