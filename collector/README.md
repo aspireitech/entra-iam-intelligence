@@ -145,9 +145,45 @@ interval. It listens on `127.0.0.1:8766` by default: `/health`, `/tenants`,
 `/tenants/:id/snapshot`, `/tenants/:id/history?days=N`,
 `/tenants/:id/delta?days=N`, `/tenants/:id/app-events?days=N`, `/combined`.
 
-Run it as a persistent process the same way you'd run the AD agent — a
-Windows service (e.g. via NSSM or Task Scheduler "at startup"), a systemd
-unit, or a container. It has no dependency on a browser tab being open.
+`.\start.ps1` / `./start.sh` run the collector in the foreground of whatever
+terminal launched them - closing that terminal, or rebooting the machine,
+stops it. That's fine for setup and testing, but production needs the
+collector running unattended, restarting itself on crash, and starting
+automatically on boot. Two ways to get that, matching this repo's existing
+platform split:
+
+**Windows** - install it as a real Windows Service using
+[NSSM](https://nssm.cc/download) (a small, well-known third-party service
+wrapper - download it yourself rather than having a script fetch and run an
+executable for you):
+
+```powershell
+# From an elevated (Run as Administrator) PowerShell prompt:
+cd collector\scripts
+.\install-windows-service.ps1                        # if nssm.exe is on PATH
+.\install-windows-service.ps1 -NssmPath C:\tools\nssm.exe   # otherwise
+```
+
+This registers the service to auto-start at boot, restart on crash (capped
+so a persistent failure doesn't spin forever), and log to
+`collector\logs\collector.out.log` / `collector.err.log`. Manage it with the
+usual service commands (`Get-Service IAMIntelligenceCollector`,
+`Restart-Service IAMIntelligenceCollector`) or remove it with
+`.\uninstall-windows-service.ps1`.
+
+**Linux** - a systemd unit template is at
+`collector/scripts/iam-collector.service`. Edit `WorkingDirectory` and
+`User` for your install path and a dedicated non-root user, then:
+
+```bash
+sudo cp collector/scripts/iam-collector.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now iam-collector
+```
+
+Either way, this only manages the **collector**. The dashboard SPA needs no
+long-running process at all in production - see "Deploying the dashboard"
+in the top-level `README.md`.
 
 ## 5. Point the SPA at it
 
