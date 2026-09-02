@@ -57,6 +57,34 @@ npm run build
 npm run preview
 ```
 
+`npm run preview` starts Vite's own preview server, which - like
+`npm run dev` - is a foreground process for local verification only, not a
+production deployment.
+
+## Deploying the dashboard
+
+`npm run build` produces a `dist/` folder of plain static files (HTML, JS,
+CSS) - there is no server-side rendering and no client-side router (the app
+has exactly one route, `/index.html`, and switches between panels with
+internal state), so **no long-running Node process, and no URL-rewrite
+config, is needed to serve it in production.** Any static web server works:
+
+- **IIS on Windows** - create a site (or a folder under an existing one)
+  pointed at `dist/`; IIS is already a Windows Service, so once it's running
+  the dashboard is "up" with nothing further to manage. Set `VITE_*` env
+  vars (client ID, `VITE_COLLECTOR_URL`, etc.) at build time - they're baked
+  into the static output, not read at runtime.
+- **nginx / Apache / any static host** (S3+CloudFront, Azure Static Web
+  Apps, etc.) - copy `dist/` to the document root; same rule, no rewrite
+  rules needed.
+
+Rebuild and redeploy `dist/` whenever `VITE_*` config changes or the app is
+updated; there's no runtime config reload.
+
+The collector is the one piece that does need to run continuously in the
+background - see "Run it as a persistent process" in `collector/README.md`
+for the Windows Service (NSSM) and Linux (systemd) installers.
+
 ## Product direction
 
 Next milestones (see the full engineering handoff for detail): a source-agnostic normalized entity model so Entra and Active Directory data share one schema, per-metric calculation drill-down, application governance detail (owners, credential expiry), and additional connectors (Microsoft 365, Okta, SailPoint, CyberArk, ServiceNow, Splunk). Write/destructive Graph permissions stay out of the monitoring MVP.

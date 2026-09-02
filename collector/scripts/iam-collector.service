@@ -1,0 +1,18 @@
+[Unit]
+Description=IAM Intelligence Collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Edit these two paths for your install location and OS user before installing.
+WorkingDirectory=/opt/entra-iam-intelligence/collector
+ExecStart=/usr/bin/node index.js
+User=iam-collector
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
