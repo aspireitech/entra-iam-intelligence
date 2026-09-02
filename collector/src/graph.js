@@ -70,16 +70,19 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),
   ]);
 
-  const riskyUsers = await graphGetOptional(token, '/identityProtection/riskyUsers?$top=999');
-  // /roleManagement/directory/* caps $top at 500, unlike the 999 most other
-  // Graph list endpoints (users, applications, groups, devices) allow.
-  const roleAssignments = await graphGetOptional(token, '/roleManagement/directory/roleAssignments?$top=500');
-  const roleDefinitions = await graphGetOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true');
-  const conditionalAccess = await graphGetOptional(token, '/identity/conditionalAccess/policies?$top=999');
-  const subscribedSkus = await graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits');
-  const appCredentials = await graphGetOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials');
-  const userActivity = await graphGetOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses');
-  const registration = await graphGetOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999');
+  // /roleManagement/directory/* and /identityProtection/riskyUsers both cap $top at
+  // 500, unlike the 999 most other Graph list endpoints (users, applications, groups,
+  // devices) allow - confirmed by Graph's own "Invalid page size... 1 and 500" error.
+  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, userActivity, registration] = await Promise.all([
+    graphGetOptional(token, '/identityProtection/riskyUsers?$top=500'),
+    graphGetOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
+    graphGetOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
+    graphGetOptional(token, '/identity/conditionalAccess/policies?$top=999'),
+    graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits'),
+    graphGetOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials'),
+    graphGetOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses'),
+    graphGetOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999'),
+  ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
   const privilegedRoleIds = new Set(definitions.filter((r) => /administrator|global reader|security reader|privileged role/i.test(r.displayName || '')).map((r) => r.id));
