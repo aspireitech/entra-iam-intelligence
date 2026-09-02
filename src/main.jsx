@@ -8,7 +8,7 @@ import {syncLiveTenantData} from './liveTenantData.js';
 const NAV_GROUPS=[
   {section:null,items:[['Overview','⌂']]},
   {section:'Directory',items:[['Users','♙'],['Groups','♧'],['Devices','▱'],['Applications','▦']]},
-  {section:'Identity Risk',items:[['Risk Overview','◈'],['Toxic Combinations','☠'],['Sign-ins','↪'],['Conditional Access','◌'],['Alerts','⚑']]},
+  {section:'Identity Risk',items:[['Risk Overview','◈'],['Non-Human Identities','⚶'],['Toxic Combinations','☠'],['Sign-ins','↪'],['Conditional Access','◌'],['Alerts','⚑']]},
   {section:'Governance',items:[['Risk Register','▤'],['Licenses','◫'],['Access Reviews','◐'],['Provisioning','⇄']]},
   {section:'Admin',items:[['Audit Logs','▥'],['Reports','▧'],['Workflows','⚙'],['Data Explorer','⌕'],['Data Sources','◈'],['Settings','⚒']]},
 ];
@@ -20,7 +20,7 @@ const PLACEHOLDER_LABELS=new Set(['Access Reviews','Provisioning','Audit Logs','
 // placeholder labels above (placeholders only make sense once real Entra
 // data is flowing, so they're scoped to the entra source).
 const NAV_BY_SOURCE={
-  entra:['Overview','Users','Groups','Devices','Applications','Risk Overview','Toxic Combinations','Sign-ins','Conditional Access','Risk Register','Licenses','Data Sources',...PLACEHOLDER_LABELS],
+  entra:['Overview','Users','Groups','Devices','Applications','Risk Overview','Non-Human Identities','Toxic Combinations','Sign-ins','Conditional Access','Risk Register','Licenses','Data Sources',...PLACEHOLDER_LABELS],
   ad:['Overview','Data Sources'],
   combined:['Overview','Data Sources'],
   sailpoint:['Data Sources'],
@@ -29,7 +29,11 @@ const NAV_BY_SOURCE={
 function ComingSoonPage({label}){
   return <div className="source-page"><section className="grid top-grid single"><Card title={label}><div className="empty-state large">{label} isn't built yet. It's on the roadmap - this entry stays visible so the plan is transparent rather than hiding the gap.</div></Card></section></div>;
 }
-const REFRESH_SECONDS=Math.max(30,Number(import.meta.env.VITE_REFRESH_INTERVAL_SECONDS)||60);
+// Floor is 30s, not lower: each refresh re-runs ~20 live Graph queries against the
+// tenant, and polling much faster than this risks Microsoft Graph 429 throttling.
+// See docs/ARCHITECTURE.md "Refresh cadence" for the collector-backed alternative
+// that can safely go sub-10s without hitting Graph on every tick.
+const REFRESH_SECONDS=Math.max(30,Number(import.meta.env.VITE_REFRESH_INTERVAL_SECONDS)||30);
 const fmt=n=>n==null?'—':Number(n).toLocaleString();
 const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
 const EXCEPTIONS_KEY='iam_attention_exceptions';
@@ -132,6 +136,20 @@ function SignInsDetailPage({data,trend,trendDays,trendLoading,onRangeChange}){
   </div>;
 }
 
+function NonHumanIdentitiesPage({data}){
+  const [q,setQ]=useFilter();
+  const nhi=data.nonHumanIdentities||{};
+  const credItems=(data.credentialExpiry?.items||[]);
+  const inactive90Plus=(data.appActivity?.inactive91to180||0)+(data.appActivity?.inactive180||0);
+  const ownerless=(nhi.ownerlessApps||[]).filter(a=>!q||a.name.toLowerCase().includes(q.toLowerCase()));
+  if(!nhi.available)return <div className="source-page"><div className="empty-state large">Permission required (Application.Read.All) to inventory non-human identities.</div></div>;
+  return <div className="source-page">
+    <section className="kpis">{[['Service Principals','totalServicePrincipals','⚶'],['Managed Identities','managedIdentities','◆'],['App Registrations','appRegistrations','▦'],['Credential-Bearing','credentialBearing','⏱'],['Ownerless Apps','ownerlessCount','⚠']].map(([t,k,g])=><div className="kpi" key={t}><div className="kpi-icon">{g}</div><div><div className="kpi-title">{t}</div><div className="kpi-value">{fmt(nhi[k])}</div><div className="kpi-change"><span>Live Graph query</span></div></div></div>)}</section>
+    <section className="grid top-grid single"><Card title="Ownerless Applications">{!ownerless.length&&!q?<div className="empty-state">No app registrations found without at least one assigned owner.</div>:<><FilterBar q={q} onQ={setQ} placeholder="Search application name…" count={ownerless.length} total={(nhi.ownerlessApps||[]).length}/><div className="license-table"><table><thead><tr><th>Application</th><th>App ID</th></tr></thead><tbody>{ownerless.slice(0,200).map(a=><tr key={a.appId}><td>{a.name}</td><td className="mono">{a.appId}</td></tr>)}</tbody></table></div></>}<div className="disclaimer">An app registration with no owner has no accountable human to review, rotate credentials, or confirm it's still needed - a common source of orphaned non-human identities. Source: /applications $expand=owners.</div></Card></section>
+    <section className="grid top-grid single"><Card title="Credentials Expiring or Expired">{!credItems.length?<div className="empty-state">No client secrets or certificates found on tenant app registrations.</div>:<div className="cred-list">{credItems.slice(0,15).map((c,i)=><div key={`${c.appId}-${i}`} className="cred-row"><div><strong>{c.name}</strong><span>{c.type==='certificate'?'Certificate':'Client secret'} • expires {new Date(c.expiresAt).toLocaleDateString()}</span></div><b className={c.daysRemaining<=30?'critical':c.daysRemaining<=90?'warning':''}>{c.daysRemaining<0?'Expired':`${c.daysRemaining}d`}</b></div>)}</div>}<div className="disclaimer">A non-human identity's credential is its only proof of identity - an expired or long-forgotten secret is the highest-signal NHI risk. {fmt(inactive90Plus)} applications also show no observed activity for 90+ days; see Applications for the full inactivity breakdown.</div></Card></section>
+  </div>;
+}
+
 function RiskDetailPage({data,onSecurity}){
   const risky=data.riskyUserList||[];
   if(!data.riskyUsersAvailable)return <div className="source-page"><div className="permission-banner"><div><strong>Risk data not available.</strong><span>{data.riskyUsersReason||'Requires IdentityRiskyUser.Read.All, which also requires an Entra ID P2 license in this tenant.'}</span></div><button className="primary" onClick={onSecurity}>Grant security permissions</button></div></div>;
@@ -163,7 +181,8 @@ function EntraDashboard({data,onSecurity,onNavigate}){
     {key:'risk',level:'critical',title:'Risky Users',detail:'Users currently returned by Microsoft Entra ID Protection',value:data.riskyUsersAvailable?data.riskyUsers:null,nav:'Risk Overview'},
     {key:'stale',level:'warning',title:'Stale Enabled Users > 90 Days',detail:'Enabled accounts with no sign-in in the last 90 days',value:data.staleUsers,nav:'Users'},
     {key:'privileged',level:'critical',title:'Privileged Users',detail:'Unique principals assigned to detected built-in privileged roles',value:data.privilegedUsersAvailable?data.privilegedUsers:null,nav:'Risk Overview'},
-    {key:'credentials',level:(data.credentialExpiry?.expiringSoon||0)>0?'critical':'warning',title:'App Credentials Expiring ≤30 Days',detail:'Client secrets or certificates on tenant app registrations expiring within 30 days',value:data.credentialExpiry?.available?data.credentialExpiry.expiringSoon:null,nav:'Applications'}
+    {key:'credentials',level:(data.credentialExpiry?.expiringSoon||0)>0?'critical':'warning',title:'App Credentials Expiring ≤30 Days',detail:'Client secrets or certificates on tenant app registrations expiring within 30 days',value:data.credentialExpiry?.available?data.credentialExpiry.expiringSoon:null,nav:'Applications'},
+    {key:'ownerless',level:'warning',title:'Ownerless Applications',detail:'App registrations with no assigned owner to review or rotate their credentials',value:data.nonHumanIdentities?.available?data.nonHumanIdentities.ownerlessCount:null,nav:'Non-Human Identities'}
   ];
   const activeAttention=attention.filter(a=>!exceptions[a.key]);
   const acknowledgedAttention=attention.filter(a=>exceptions[a.key]);
@@ -246,13 +265,14 @@ function App(){
   const title=active==='Licenses'?'Licenses':sourceId==='entra'?(active==='Overview'?'Executive Overview':active):sourceId==='ad'?(active==='Overview'?'Active Directory Overview':active):sourceById(sourceId).name;
   const visibleLabels=new Set(NAV_BY_SOURCE[sourceId]||['Overview','Data Sources']);
   const chooseNav=label=>{if(!visibleLabels.has(label))return;setActive(label);};
-  let entraContent=null;
+  let entraContent=sourceId==='entra'&&!data?<div className="empty-state large">Collecting live data from Microsoft Graph - this runs a full tenant query and can take a few seconds on first load or after a browser refresh.</div>:null;
   if(sourceId==='entra'&&data){
     if(active==='Users')entraContent=<UsersDetailPage data={data}/>;
     else if(active==='Groups')entraContent=<GroupsDetailPage data={data}/>;
     else if(active==='Applications')entraContent=<ApplicationsDetailPage data={data}/>;
     else if(active==='Devices')entraContent=<DevicesDetailPage data={data}/>;
     else if(active==='Risk Overview')entraContent=<RiskDetailPage data={data} onSecurity={grantSecurity}/>;
+    else if(active==='Non-Human Identities')entraContent=<NonHumanIdentitiesPage data={data}/>;
     else if(active==='Sign-ins')entraContent=<SignInsDetailPage data={data} trend={signInTrend} trendDays={signInTrendDays} trendLoading={signInTrendLoading} onRangeChange={loadSignInTrend}/>;
     else if(active==='Conditional Access')entraContent=<ConditionalAccessDetailPage data={data} onSecurity={grantSecurity}/>;
     else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data}/>;

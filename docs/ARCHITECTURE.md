@@ -148,6 +148,44 @@ This only works if the collector happens to be configured to track the
 Applications page's Growth Trend card says so instead of showing nothing
 unexplained.
 
+### 2d. Refresh cadence — why the live view can't safely poll every 5 seconds
+
+The single-tenant live view (2a) re-runs roughly 20 Microsoft Graph queries
+per refresh - organization info, counts, the full user/device/application
+lists, sign-in reports, risk and role data. That's the cost of every tick,
+not a one-time cost. Microsoft Graph enforces per-app, per-tenant
+throttling (HTTP 429) once request volume gets high enough, and a burst of
+20 calls every 5 seconds against one tenant is exactly the pattern that
+trips it. So the browser's auto-refresh has a 30-second floor
+(`REFRESH_SECONDS` in `src/main.jsx`) - low enough to feel responsive,
+high enough to stay well under Graph's limits for a single signed-in user.
+
+The collector (2b) is the correct way to get sub-10-second freshness
+**without** re-querying Graph that often: it already writes one snapshot
+row to SQLite per poll, and reading that row back over HTTP is a local
+disk read, not a Graph call - it costs nothing to poll frequently. The
+architecture that gets both properties (data no more than ~1-2 minutes
+stale, UI feels instant) is:
+
+- Collector polls Graph on a moderate interval (today's floor is 5
+  minutes, in `collector/src/scheduler.js`; tightening this to ~60-120s is
+  reasonable and still far below Graph's throttling threshold for a single
+  app-only client).
+- The dashboard polls the **collector's** REST API every 5-10 seconds
+  instead of Graph directly - cheap, and already the pattern the
+  `combined` (multi-tenant) source uses via `getCombinedSnapshot()`.
+
+This isn't wired up for the single-tenant `entra` view yet: today it only
+ever calls Graph directly, and the collector snapshot shape (`collectTenant`
+in `collector/src/graph.js`) is a smaller subset of fields than the full
+live snapshot (`getTenantSnapshot` in `src/entraAuth.js`) - it's missing
+per-record detail like `recentSignIns`, `deviceList`, `appDetails`, and
+`toxicCombinations`, which the detail pages depend on. Wiring the live view
+to prefer collector data (falling back to direct Graph calls when no
+collector is configured for that tenant) is the recommended next step for
+true near-real-time refresh, but is a separate, larger change from the
+fixes in this pass.
+
 ## 3. Module map
 
 ```
@@ -215,6 +253,22 @@ threshold · ⚪ no severity meaning (informational only) · — unavailable
 |---|---|---|
 | Risky Users table | `/identityProtection/riskyUsers` | 🔴 only on `riskLevel === 'high'`; medium/low shown without color (not "safe", just not the top tier) |
 | Privileged Role Assignments | `/roleManagement/directory/roleAssignments` + `roleDefinitions`, matched by a display-name pattern (`administrator\|global reader\|security reader\|privileged role`) | Count only in this version - not yet broken out per user here (see Toxic Combinations for the per-user cross-reference) |
+
+### Non-Human Identities page (new)
+
+Non-human identity (NHI) governance - service accounts, app registrations,
+and managed identities that authenticate without a person behind them - is
+a distinct risk category from user identity: nobody notices when an NHI's
+credential is stale, over-privileged, or unowned, because no one is signing
+in to complain.
+
+| Panel | Source | Calculation | Notes |
+|---|---|---|---|
+| Service Principals | `/servicePrincipals?$count=true` | Raw tenant count | Broader than "Total Applications" - includes enterprise/gallery apps with no local app registration |
+| Managed Identities | `/servicePrincipals?$filter=servicePrincipalType eq 'ManagedIdentity'` | Raw count | Azure resources authenticating with a Microsoft-managed credential (no secret to leak or rotate) |
+| App Registrations | Same as "Total Applications" elsewhere | — | This tenant's own registered apps only |
+| Credential-Bearing | `/applications` `keyCredentials`/`passwordCredentials` | Apps with at least one certificate or secret | The subset actually capable of authenticating as itself |
+| Ownerless Apps | `/applications?$expand=owners` | `owners.length === 0` | 🔴 no color, but surfaced as a Need Attention item - an app with no owner has no one accountable for reviewing or rotating it |
 
 ### Toxic Combinations page (new)
 
