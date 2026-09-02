@@ -3,7 +3,8 @@ import { getAppToken } from './msal.js';
 const GRAPH_BASE = 'https://graph.microsoft.com';
 
 async function graphGet(token, path, version = 'v1.0') {
-  const response = await fetch(`${GRAPH_BASE}/${version}${path}`, {
+  const url = path.startsWith('https://') ? path : `${GRAPH_BASE}/${version}${path}`;
+  const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual' },
   });
   if (!response.ok) {
@@ -18,6 +19,30 @@ async function graphGet(token, path, version = 'v1.0') {
 async function graphGetOptional(token, path, version) {
   try {
     return { ok: true, data: await graphGet(token, path, version) };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+// Follows @odata.nextLink until exhausted, so a tenant with more records than one
+// page (999 for most list endpoints, 500 for roleManagement/riskyUsers) doesn't get
+// silently truncated - at 17,000 app registrations or 30,000 users, a single-page
+// fetch would undercount stale users, inactive apps, expiring credentials etc.
+// rather than reporting them accurately. maxPages is a hard safety cap.
+async function graphGetAllPages(token, path, version = 'v1.0', maxPages = 60) {
+  let url = path, all = [], pages = 0, page;
+  while (url && pages < maxPages) {
+    page = await graphGet(token, url, version);
+    all = all.concat(page.value || []);
+    url = page['@odata.nextLink'] || null;
+    pages++;
+  }
+  return { value: all, truncated: Boolean(url) };
+}
+
+async function graphGetAllPagesOptional(token, path, version) {
+  try {
+    return { ok: true, data: await graphGetAllPages(token, path, version) };
   } catch (error) {
     return { ok: false, error };
   }
@@ -74,14 +99,14 @@ export async function collectTenant(tenant, config) {
   // 500, unlike the 999 most other Graph list endpoints (users, applications, groups,
   // devices) allow - confirmed by Graph's own "Invalid page size... 1 and 500" error.
   const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, userActivity, registration] = await Promise.all([
-    graphGetOptional(token, '/identityProtection/riskyUsers?$top=500'),
-    graphGetOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
-    graphGetOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
+    graphGetAllPagesOptional(token, '/identityProtection/riskyUsers?$top=500'),
+    graphGetAllPagesOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
+    graphGetAllPagesOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
     graphGetOptional(token, '/identity/conditionalAccess/policies?$top=999'),
     graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits'),
-    graphGetOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials'),
-    graphGetOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses'),
-    graphGetOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999'),
+    graphGetAllPagesOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials'),
+    graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses'),
+    graphGetAllPagesOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999'),
   ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
