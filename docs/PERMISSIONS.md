@@ -19,15 +19,16 @@ needs them (progressive consent — see `src/entraAuth.js`).
 | Scope | Type | Consent | Purpose | Endpoint(s) | Dashboard feature |
 |---|---|---|---|---|---|
 | `User.Read` | Delegated | User | Sign in, identify operator | `/me` | Auth gate |
-| `User.Read.All` | Delegated | Admin | User inventory, manager relationships, license assignment | `/users`, `/users?$expand=manager` | Total Users, Stale Enabled Users, Users Without Manager, License page |
-| `Application.Read.All` | Delegated | Admin | App/service-principal inventory and credentials | `/applications`, `/reports/servicePrincipalSignInActivities` (beta) | Total Applications, Application Usage buckets, Application Credential Expiry |
+| `User.Read.All` | Delegated | Admin | User inventory, manager relationships, license assignment, guest/member (`userType`) | `/users`, `/users?$expand=manager` | Total Users, Stale Enabled Users, Users Without Manager, License page, Guests page |
+| `Application.Read.All` | Delegated | Admin | App/service-principal inventory and credentials, service principal population (incl. managed identities), tenant-wide application permission grants to Microsoft Graph | `/applications`, `/reports/servicePrincipalSignInActivities` (beta), `/servicePrincipals`, `/servicePrincipals/{graphSpId}/appRoleAssignedTo` | Total Applications, Application Usage buckets, Application Credential Expiry, Non-Human Identities, App Consent (application grants half) |
 | `Group.Read.All` | Delegated | Admin | Group inventory | `/groups` | Total Groups |
 | `Device.Read.All` | Delegated | Admin | Device inventory | `/devices` | Active Devices |
-| `AuditLog.Read.All` | Delegated | Admin | Sign-in/audit telemetry, MFA registration report | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails` | Sign-ins (7D), Recent Activity, Sign-in trend, MFA gap count |
+| `AuditLog.Read.All` | Delegated | Admin | Sign-in/audit telemetry, MFA registration report, legacy/basic-auth sign-in detection (`clientAppUsed`) | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails` | Sign-ins (7D), Recent Activity, Sign-in trend, MFA gap count, Legacy Authentication page |
 | `IdentityRiskyUser.Read.All` | Delegated | Admin | Requested separately | `/identityProtection/riskyUsers` | Risky Users, Identity Risk Overview |
-| `RoleManagement.Read.Directory` | Delegated | Admin | Requested separately | `/roleManagement/directory/roleAssignments`, `/roleManagement/directory/roleDefinitions` | Privileged Users |
-| `Policy.Read.All` | Delegated | Admin | Requested separately | `/identity/conditionalAccess/policies` | Conditional Access policy count |
+| `RoleManagement.Read.Directory` | Delegated | Admin | Requested separately. Also covers PIM eligibility schedules - `RoleEligibilitySchedule.Read.Directory` is the narrower, least-privilege alternative if you'd rather split it out | `/roleManagement/directory/roleAssignments`, `/roleManagement/directory/roleDefinitions`, `/roleManagement/directory/roleEligibilityScheduleInstances` | Privileged Users, Privileged Access page (PIM eligible vs. active) |
+| `Policy.Read.All` | Delegated | Admin | Requested separately | `/identity/conditionalAccess/policies` | Conditional Access policy count, MFA coverage check |
 | `Organization.Read.All` | Delegated | Admin | Requested separately, only when Licenses is opened | `/subscribedSkus`, `/organization` | License Inventory, tenant display name/ID |
+| `DelegatedPermissionGrant.Read.All` | Delegated | Admin | Requested separately, only when App Consent is opened - **new as of the App Consent feature** | `/oauth2PermissionGrants` | App Consent page (delegated grants half) |
 | `ProvisioningLog.Read.All` | Delegated | Admin | Not requested until Provisioning feature ships | `/auditLogs/provisioning` | (not yet built) |
 
 Never requested: `Directory.Read.All` or any `.ReadWrite` scope. See
@@ -54,6 +55,14 @@ registration **every connected tenant's own admin must grant it separately**.
 
 Never requested: any `.ReadWrite` application permission, `Directory.Read.All`,
 or `Mail.Read`/`Files.Read.All`-class permissions unrelated to identity.
+
+**Not yet ported to the collector**: Guests, Privileged Access (PIM), Legacy
+Authentication, App Consent, and the Conditional Access MFA coverage check
+are implemented in the browser's delegated live view (`src/entraAuth.js`)
+only. They don't yet exist in `collector/src/graph.js`'s `collectTenant()`,
+so these pages currently always use the direct-Graph path even when the
+collector is otherwise handling the rest of the snapshot for this tenant.
+Porting them is the next step for collector/live parity.
 
 ## Active Directory — Live (agent-based, not OAuth)
 
