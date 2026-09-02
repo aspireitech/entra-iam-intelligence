@@ -43,26 +43,28 @@ registration **every connected tenant's own admin must grant it separately**.
 
 | Permission | Purpose | Endpoint(s) |
 |---|---|---|
-| `User.Read.All` | User inventory, stale/manager signals, license assignment | `/users` |
-| `Application.Read.All` | App/service-principal inventory and credential expiry | `/applications` |
+| `User.Read.All` | User inventory, stale/manager signals, license assignment, guest/member breakdown | `/users` |
+| `Application.Read.All` | App/service-principal inventory, credential expiry, service principal population | `/applications`, `/servicePrincipals` |
 | `Group.Read.All` | Group inventory | `/groups` |
 | `Device.Read.All` | Device inventory | `/devices` |
-| `AuditLog.Read.All` | Sign-in counts, MFA registration report, new-application creation events (actor: user vs. application) | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails`, `/auditLogs/directoryAudits` |
+| `AuditLog.Read.All` | Sign-in counts, MFA registration report, new-application creation events (actor: user vs. application), legacy/basic-auth sign-in detection | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails`, `/auditLogs/directoryAudits` |
 | `IdentityRiskyUser.Read.All` | Risky users | `/identityProtection/riskyUsers` |
-| `RoleManagement.Read.Directory` | Privileged role assignments | `/roleManagement/directory/roleAssignments` |
-| `Policy.Read.All` | Conditional Access policy count | `/identity/conditionalAccess/policies` |
+| `RoleManagement.Read.Directory` | Privileged role assignments and PIM eligibility schedules | `/roleManagement/directory/roleAssignments`, `/roleManagement/directory/roleEligibilityScheduleInstances` |
+| `Policy.Read.All` | Conditional Access policies and MFA coverage check | `/identity/conditionalAccess/policies` |
 | `Organization.Read.All` | Tenant identity, license SKUs | `/organization`, `/subscribedSkus` |
 
 Never requested: any `.ReadWrite` application permission, `Directory.Read.All`,
 or `Mail.Read`/`Files.Read.All`-class permissions unrelated to identity.
 
-**Not yet ported to the collector**: Guests, Privileged Access (PIM), Legacy
-Authentication, App Consent, and the Conditional Access MFA coverage check
-are implemented in the browser's delegated live view (`src/entraAuth.js`)
-only. They don't yet exist in `collector/src/graph.js`'s `collectTenant()`,
-so these pages currently always use the direct-Graph path even when the
-collector is otherwise handling the rest of the snapshot for this tenant.
-Porting them is the next step for collector/live parity.
+**Collector parity**: Guests, Privileged Access (PIM), Legacy Authentication,
+and the Conditional Access MFA coverage check are now computed identically
+in both `src/entraAuth.js` (browser live view) and `collector/src/graph.js`
+`collectTenant()` - these pages work the same whether the dashboard is
+reading from the collector or from a direct live Graph call. **App Consent
+is the one exception, by design**: it's a separate on-demand fetch (like
+Licenses), always a fresh live Graph call regardless of source mode, because
+resolving delegated-grant display names needs a tenant-wide
+`/servicePrincipals` list too heavy to include in every snapshot refresh.
 
 ## Active Directory — Live (agent-based, not OAuth)
 

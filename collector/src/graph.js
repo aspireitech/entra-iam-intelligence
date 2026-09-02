@@ -148,7 +148,7 @@ export async function collectTenant(tenant, config) {
   // /roleManagement/directory/* and /identityProtection/riskyUsers both cap $top at
   // 500, unlike the 999 most other Graph list endpoints (users, applications, groups,
   // devices) allow - confirmed by Graph's own "Invalid page size... 1 and 500" error.
-  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount] = await Promise.all([
+  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthSample] = await Promise.all([
     graphGetAllPagesOptional(token, '/identityProtection/riskyUsers?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
@@ -156,25 +156,51 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits'),
     graphGetAllPagesOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials&$expand=owners($select=id)'),
     graphGetAllPagesOptional(token, '/reports/servicePrincipalSignInActivities?$top=999', 'beta'),
-    graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses'),
+    graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses,userType'),
     graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled&$expand=manager($select=id,displayName,userPrincipalName)'),
     graphGetAllPagesOptional(token, '/devices?$top=999&$select=id,displayName,operatingSystem,operatingSystemVersion,trustType,isCompliant,accountEnabled,approximateLastSignInDateTime'),
     graphGetAllPagesOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999'),
     graphGetOptional(token, '/servicePrincipals?$count=true&$top=1'),
     graphGetOptional(token, `/servicePrincipals?$count=true&$top=1&$filter=${encodeURIComponent(`servicePrincipalType eq 'ManagedIdentity'`)}`),
+    graphGetAllPagesOptional(token, '/roleManagement/directory/roleEligibilityScheduleInstances?$top=500'),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
+    graphGetOptional(token, `/auditLogs/signIns?$top=50&$orderby=createdDateTime desc&$filter=${encodeURIComponent(`clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
   ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
   const privilegedRoleIds = new Set(definitions.filter((r) => /administrator|global reader|security reader|privileged role/i.test(r.displayName || '')).map((r) => r.id));
   const assignments = roleAssignments.ok ? roleAssignments.data.value || [] : [];
   const privilegedPrincipalIds = roleAssignments.ok ? new Set(assignments.filter((a) => privilegedRoleIds.has(a.roleDefinitionId)).map((a) => a.principalId)) : new Set();
+
+  // Kept identical in shape to src/entraAuth.js's caPolicyList/mfaCoverageAllUsers - a
+  // mismatch here previously showed a false "No" (not an honest "unavailable") for every
+  // policy's Requires MFA / Targets All Users columns in collector mode, since those
+  // fields were simply missing rather than computed.
+  const caPolicyList = conditionalAccess.ok ? (conditionalAccess.data.value || []).map((p) => ({ id: p.id, name: p.displayName, state: p.state, requiresMfa: (p.grantControls?.builtInControls || []).includes('mfa'), targetsAllUsers: (p.conditions?.users?.includeUsers || []).includes('All'), excludedUserCount: (p.conditions?.users?.excludeUsers || []).length })) : [];
+  const mfaCoverageAllUsers = conditionalAccess.ok ? caPolicyList.some((p) => p.state === 'enabled' && p.requiresMfa && p.targetsAllUsers) : null;
   const privilegedUsers = roleAssignments.ok ? privilegedPrincipalIds.size : null;
+
+  // PIM eligibility - see the identical comment in src/entraAuth.js for what these two
+  // gaps mean (eligible-not-active = invisible blast radius, active-not-eligible =
+  // standing access that bypasses just-in-time activation).
+  const eligibilityRecords = roleEligibility.ok ? roleEligibility.data.value || [] : [];
+  const eligiblePrincipalIds = roleEligibility.ok ? new Set(eligibilityRecords.filter((e) => privilegedRoleIds.has(e.roleDefinitionId)).map((e) => e.principalId)) : new Set();
+  const eligibleNotActiveIds = [...eligiblePrincipalIds].filter((id) => !privilegedPrincipalIds.has(id));
+  const activeNotEligibleIds = [...privilegedPrincipalIds].filter((id) => !eligiblePrincipalIds.has(id));
 
   const users = userActivity.ok ? userActivity.data.value || [] : [];
   const userActivityAvailable = userActivity.ok;
   const staleUserList = userActivity.ok ? users.filter((u) => u.accountEnabled !== false && (!u.signInActivity?.lastSignInDateTime || new Date(u.signInActivity.lastSignInDateTime).getTime() < staleCutoff)) : [];
   const staleUsers = userActivity.ok ? staleUserList.length : null;
   const userActivityList = userActivity.ok ? users.map((u) => ({ id: u.id, name: u.displayName || u.userPrincipalName, upn: u.userPrincipalName, enabled: u.accountEnabled, lastSignIn: u.signInActivity?.lastSignInDateTime || null })) : [];
+
+  // Guests - see the identical comment in src/entraAuth.js.
+  const guestList = userActivityAvailable ? users.filter((u) => u.userType === 'Guest').map((u) => ({ id: u.id, name: u.displayName || u.userPrincipalName, upn: u.userPrincipalName, enabled: u.accountEnabled, lastSignIn: u.signInActivity?.lastSignInDateTime || null })) : [];
+  const guestStaleCutoff = Date.now() - 90 * 86400000;
+  const guests = { available: userActivityAvailable, total: userActivityAvailable ? guestList.length : null, memberCount: userActivityAvailable ? users.length - guestList.length : null, staleCount: userActivityAvailable ? guestList.filter((u) => u.enabled !== false && (!u.lastSignIn || new Date(u.lastSignIn).getTime() < guestStaleCutoff)).length : null, list: guestList };
+
+  // Legacy authentication - see the identical comment in src/entraAuth.js.
+  const legacyAuth = { available: legacyAuthCount.ok, signIns7d: legacyAuthCount.ok ? Number(legacyAuthCount.data['@odata.count'] || 0) : null, reason: legacyAuthCount.ok ? null : String(legacyAuthCount.error?.message || ''), sample: legacyAuthSample.ok ? (legacyAuthSample.data.value || []).map((s) => ({ id: s.id, user: s.userDisplayName || s.userPrincipalName || 'Service principal', app: s.appDisplayName || '—', clientAppUsed: s.clientAppUsed || 'Unknown', createdDateTime: s.createdDateTime, success: s.status?.errorCode === 0 })) : [] };
   const licensedUsers = users.filter((u) => (u.assignedLicenses || []).length > 0);
   const staleLicensedUserCount = userActivity.ok
     ? licensedUsers.filter((u) => u.accountEnabled !== false && (!u.signInActivity?.lastSignInDateTime || new Date(u.signInActivity.lastSignInDateTime).getTime() < staleCutoff)).length
@@ -221,6 +247,7 @@ export async function collectTenant(tenant, config) {
   if (managerAvailable) for (const u of managerRecords.data.value || []) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (userActivityAvailable) for (const u of users) if (!nameById.has(u.id)) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (registrationAvailable) for (const u of registrationList) if (!nameById.has(u.id)) nameById.set(u.id, u.userDisplayName || u.userPrincipalName);
+  const privilegedAccess = { available: roleAssignments.ok && roleEligibility.ok, activeCount: privilegedUsers, eligibleCount: roleEligibility.ok ? eligiblePrincipalIds.size : null, eligibleNotActive: eligibleNotActiveIds.map((id) => ({ id, name: nameById.get(id) || id })), activeNotEligible: activeNotEligibleIds.map((id) => ({ id, name: nameById.get(id) || id })) };
   const mfaMissingIds = new Set(mfaMissingUsers.map((u) => u.id));
   const riskyUserRecords = riskyUsers.ok ? riskyUsers.data.value || [] : [];
   const riskyIds = new Set(riskyUserRecords.map((u) => u.id));
@@ -257,7 +284,7 @@ export async function collectTenant(tenant, config) {
   ].filter(Boolean);
 
   const orgValue = org.ok ? (org.data.value || [])[0] : null;
-  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount];
+  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount];
 
   return {
     tenantId: tenant.id,
@@ -287,11 +314,15 @@ export async function collectTenant(tenant, config) {
     privilegedUsersAvailable: roleAssignments.ok,
     conditionalAccessPolicies: conditionalAccess.ok ? (conditionalAccess.data.value || []).length : null,
     conditionalAccessAvailable: conditionalAccess.ok,
-    conditionalAccessPolicyList: conditionalAccess.ok ? (conditionalAccess.data.value || []).map((p) => ({ id: p.id, name: p.displayName, state: p.state })) : [],
+    conditionalAccessPolicyList: caPolicyList,
+    mfaCoverageAllUsers,
     staleUsers,
     userActivityAvailable,
     userActivityList,
     usersWithoutManager,
+    privilegedAccess,
+    guests,
+    legacyAuth,
     toxicCombinations,
     toxicCombinationsAvailable,
     toxicCombinationsCount: toxicCombinations.length,
