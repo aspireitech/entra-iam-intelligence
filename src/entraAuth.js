@@ -82,8 +82,10 @@ const SKU_NAMES={SPE_E3:'Microsoft 365 E3',SPE_E5:'Microsoft 365 E5',SPE_F1:'Mic
 function friendlySkuName(code){return SKU_NAMES[code]||code||'Unknown SKU';}
 export async function getLicenseSnapshot(){
  const collectedAt=new Date().toISOString();
- const skusResult=await graphGetOptional('/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits,capabilityStatus',LICENSE_SCOPES);
- const usersResult=await graphGetOptional('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,assignedLicenses,signInActivity',CORE_SCOPES);
+ const [skusResult,usersResult]=await Promise.all([
+   graphGetOptional('/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits,capabilityStatus',LICENSE_SCOPES),
+   graphGetAllPagesOptional('/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,assignedLicenses,signInActivity',CORE_SCOPES),
+ ]);
  const users=usersResult.ok?(usersResult.data.value||[]):[];
  const staleCutoff=Date.now()-90*86400000;
  const licensedUsers=users.filter(u=>(u.assignedLicenses||[]).length>0);
