@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import './styles.css';
 import {connectSecurityScopes,connectLicenseScopes,getLicenseSnapshot,getSignInTrend,signOut} from './entraAuth.js';
 import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents} from './dataSources.js';
-import {syncLiveTenantData,getCachedOverview} from './liveTenantData.js';
+import {syncTenantData,getCachedOverview} from './liveTenantData.js';
 
 const NAV_GROUPS=[
   {section:null,items:[['Overview','⌂']]},
@@ -29,11 +29,15 @@ const NAV_BY_SOURCE={
 function ComingSoonPage({label}){
   return <div className="source-page"><section className="grid top-grid single"><Card title={label}><div className="empty-state large">{label} isn't built yet. It's on the roadmap - this entry stays visible so the plan is transparent rather than hiding the gap.</div></Card></section></div>;
 }
-// Floor is 30s, not lower: each refresh re-runs ~20 live Graph queries against the
-// tenant, and polling much faster than this risks Microsoft Graph 429 throttling.
-// See docs/ARCHITECTURE.md "Refresh cadence" for the collector-backed alternative
-// that can safely go sub-10s without hitting Graph on every tick.
+// Floor is 30s, not lower: a direct-Graph refresh re-runs ~20+ live Graph queries
+// against the tenant, and polling much faster than this risks Microsoft Graph 429
+// throttling. This only applies when falling back to a direct Graph fetch - see
+// COLLECTOR_REFRESH_SECONDS below for the normal, collector-backed path.
 const REFRESH_SECONDS=Math.max(30,Number(import.meta.env.VITE_REFRESH_INTERVAL_SECONDS)||30);
+// When a collector is tracking this tenant, refreshing reads its last SQLite
+// snapshot over localhost HTTP - no Graph traffic - so it's safe to poll much
+// faster. See docs/ARCHITECTURE.md "Refresh cadence".
+const COLLECTOR_REFRESH_SECONDS=Math.max(5,Number(import.meta.env.VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS)||8);
 const fmt=n=>n==null?'—':Number(n).toLocaleString();
 const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
 const EXCEPTIONS_KEY='iam_attention_exceptions';
@@ -264,17 +268,29 @@ function App(){
   const loadSignInTrend=days=>{setSignInTrendDays(days);setSignInTrendLoading(true);getSignInTrend(days).then(setSignInTrend).catch(()=>setSignInTrend(null)).finally(()=>setSignInTrendLoading(false));};
   useEffect(()=>{if(active==='Sign-ins'&&sourceId==='entra'&&data?.signInsAvailable&&!signInTrend&&!signInTrendLoading)loadSignInTrend(7);},[active,sourceId,data]);
   const refreshingRef=useRef(false);
+  const dataSourceRef=useRef(data?.dataSource||null);
+  useEffect(()=>{dataSourceRef.current=data?.dataSource||null;},[data]);
   useEffect(()=>{
     if(sourceId!=='entra')return;
-    const id=setInterval(async()=>{
-      if(refreshingRef.current||document.visibilityState!=='visible')return;
-      refreshingRef.current=true;
-      try{const snap=await syncLiveTenantData();setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
-      finally{refreshingRef.current=false;}
-    },REFRESH_SECONDS*1000);
-    return()=>clearInterval(id);
+    let cancelled=false,timer=null;
+    // Recursive setTimeout, not setInterval: the interval itself changes once the
+    // collector confirms it's tracking this tenant (COLLECTOR_REFRESH_SECONDS,
+    // typically 8s) vs. falling back to a direct Graph poll (REFRESH_SECONDS,
+    // floor 30s) - this picks the current interval fresh on every tick instead of
+    // needing the effect to re-run whenever the data source changes.
+    const scheduleNext=()=>{if(cancelled)return;const seconds=dataSourceRef.current==='collector'?COLLECTOR_REFRESH_SECONDS:REFRESH_SECONDS;timer=setTimeout(tick,seconds*1000);};
+    const tick=async()=>{
+      if(!refreshingRef.current&&document.visibilityState==='visible'){
+        refreshingRef.current=true;
+        try{const snap=await syncTenantData();setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
+        finally{refreshingRef.current=false;}
+      }
+      scheduleNext();
+    };
+    scheduleNext();
+    return()=>{cancelled=true;if(timer)clearTimeout(timer);};
   },[sourceId]);
-  const refresh=async()=>{setLoading(true);try{if(sourceId==='entra'){const snap=await syncLiveTenantData();setData(snap);setToast('Entra data refreshed')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
+  const refresh=async()=>{setLoading(true);try{if(sourceId==='entra'){const snap=await syncTenantData();setData(snap);setToast(snap.dataSource==='collector'?'Refreshed from collector':'Entra data refreshed (live Graph)')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
   const chooseSource=id=>{setActiveSource(id);setSourceId(id);setActive('Overview');};
   const grantSecurity=async()=>{try{setToast('Requesting security permissions…');await connectSecurityScopes();setToast('Consent completed; refreshing security data…');await refresh()}catch(e){setToast(e.message||'Security consent failed')}setTimeout(()=>setToast(''),4000)};
   const grantLicense=async()=>{setLicenseLoading(true);try{setToast('Requesting license permissions…');await connectLicenseScopes();setToast('Consent completed; loading license data…');const d=await getLicenseSnapshot();setLicenseData(d);}catch(e){setToast(e.message||'License consent failed')}finally{setLicenseLoading(false);setTimeout(()=>setToast(''),4000)}};
@@ -296,7 +312,7 @@ function App(){
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
     else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav}/>;
   }
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={signOut}><span>⇥</span>Sign out</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>Auto-refresh every {REFRESH_SECONDS}s</>}</div>{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={signOut}><span>⇥</span>Sign out</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);

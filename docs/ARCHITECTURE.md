@@ -148,43 +148,62 @@ This only works if the collector happens to be configured to track the
 Applications page's Growth Trend card says so instead of showing nothing
 unexplained.
 
-### 2d. Refresh cadence — why the live view can't safely poll every 5 seconds
+### 2d. Refresh cadence — collector-backed by default, direct Graph as fallback
 
-The single-tenant live view (2a) re-runs roughly 20 Microsoft Graph queries
-per refresh - organization info, counts, the full user/device/application
-lists, sign-in reports, risk and role data. That's the cost of every tick,
-not a one-time cost. Microsoft Graph enforces per-app, per-tenant
-throttling (HTTP 429) once request volume gets high enough, and a burst of
-20 calls every 5 seconds against one tenant is exactly the pattern that
-trips it. So the browser's auto-refresh has a 30-second floor
-(`REFRESH_SECONDS` in `src/main.jsx`) - low enough to feel responsive,
-high enough to stay well under Graph's limits for a single signed-in user.
+The single-tenant live view now prefers the collector. `src/liveTenantData.js`
+`syncTenantData()` is the entry point (called on initial load in
+`src/authBoot.js`, on every auto-refresh tick, and on the manual Refresh
+button in `src/main.jsx`):
 
-The collector (2b) is the correct way to get sub-10-second freshness
-**without** re-querying Graph that often: it already writes one snapshot
-row to SQLite per poll, and reading that row back over HTTP is a local
-disk read, not a Graph call - it costs nothing to poll frequently. The
-architecture that gets both properties (data no more than ~1-2 minutes
-stale, UI feels instant) is:
+```mermaid
+sequenceDiagram
+    participant UI as Dashboard (main.jsx)
+    participant Sync as syncTenantData()
+    participant Col as Collector API (127.0.0.1:8766)
+    participant Graph as Microsoft Graph
 
-- Collector polls Graph on a moderate interval (today's floor is 5
-  minutes, in `collector/src/scheduler.js`; tightening this to ~60-120s is
-  reasonable and still far below Graph's throttling threshold for a single
-  app-only client).
-- The dashboard polls the **collector's** REST API every 5-10 seconds
-  instead of Graph directly - cheap, and already the pattern the
-  `combined` (multi-tenant) source uses via `getCombinedSnapshot()`.
+    UI->>Sync: refresh tick
+    Sync->>Col: GET /tenants/{tenantId}/snapshot
+    alt collector configured, reachable, tracking this tenant
+        Col-->>Sync: full snapshot (dataSource:'collector')
+        Sync-->>UI: setData(snapshot) - next tick in 8s (COLLECTOR_REFRESH_SECONDS)
+    else collector not configured / not tracking this tenant / unreachable
+        Sync->>Graph: getTenantSnapshot() - ~20+ live Graph queries
+        Graph-->>Sync: full snapshot (dataSource:'live-graph')
+        Sync-->>UI: setData(snapshot) - next tick in 30s (REFRESH_SECONDS)
+    end
+```
 
-This isn't wired up for the single-tenant `entra` view yet: today it only
-ever calls Graph directly, and the collector snapshot shape (`collectTenant`
-in `collector/src/graph.js`) is a smaller subset of fields than the full
-live snapshot (`getTenantSnapshot` in `src/entraAuth.js`) - it's missing
-per-record detail like `recentSignIns`, `deviceList`, `appDetails`, and
-`toxicCombinations`, which the detail pages depend on. Wiring the live view
-to prefer collector data (falling back to direct Graph calls when no
-collector is configured for that tenant) is the recommended next step for
-true near-real-time refresh, but is a separate, larger change from the
-fixes in this pass.
+Why this is safe to poll fast in collector mode: reading the collector's
+`/tenants/:id/snapshot` endpoint is a local JSON-file read behind an HTTP
+call, not a Graph request - it costs the collector nothing to serve often.
+Microsoft Graph itself is only queried by the **collector's own** scheduled
+poll (`collector/src/scheduler.js`, 5-minute floor), never by the browser
+tick. The direct-Graph fallback path keeps its 30-second floor
+(`REFRESH_SECONDS` in `src/main.jsx`) for the reason above: ~20+ live Graph
+calls per tick would risk 429 throttling if polled faster.
+
+`collector/src/graph.js` `collectTenant()` now returns the same field shape
+as `src/entraAuth.js` `getTenantSnapshot()` for every field the dashboard
+renders (`recentSignIns`, `deviceList`, `appDetails`, `toxicCombinations`,
+`nonHumanIdentities`, `healthScore`, etc.) - kept as parallel, intentionally
+duplicated implementations rather than a shared module (the two run in
+different runtimes - browser delegated-auth vs. Node app-only-auth - and a
+cross-package import risked breaking Vite's dev server file-system
+restrictions untested on the user's exact setup). The two must be kept in
+sync by hand; a mismatch here is exactly the bug class this product had
+twice already (the `$top=999` and pagination-truncation bugs each existed
+identically in both files).
+
+**Operational caveat**: the collector's HTTP API binds to `127.0.0.1` only
+(`collector/src/server.js`), so `VITE_COLLECTOR_URL` only works when the
+browser and the collector run on the same machine (or with a reverse proxy
+in front of the collector). This is fine for the local/single-machine setup
+this product has been tested against - it is **not** yet safe to expose to
+other machines without adding TLS and reviewing the existing
+`X-IAM-Collector-Token` header as the only access control. Multi-machine
+deployment (dashboard hosted separately from the collector) needs that
+hardening first.
 
 ## 3. Module map
 

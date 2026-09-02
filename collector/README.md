@@ -162,6 +162,23 @@ Selecting **All Identity Sources (Combined)** in the dashboard's source
 tabs will then show aggregated KPIs across every configured tenant, a
 per-tenant breakdown, and each tenant's certificate expiry status.
 
+**The single-tenant Microsoft Entra ID view uses the collector too, automatically.**
+If the tenant you sign into matches a tenant ID already tracked in
+`tenants.json`, the dashboard reads that tenant's `/tenants/:id/snapshot`
+from the collector instead of querying Graph directly - refreshing every
+~8s (`VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS`, default 8) instead of every
+30s, since it's a local read rather than a live Graph call. No separate
+setup beyond the two env vars above; the live-row footer at the bottom of
+the Overview page says which mode is active ("Collector snapshot" vs. "Live
+Microsoft Graph"). If the collector is unreachable, isn't tracking this
+tenant yet, or its first collection cycle for this tenant hasn't completed,
+the dashboard falls back to the direct Graph query it always used before -
+it never goes blank because of this.
+
+This only works when the browser can reach the collector - by default that
+means the same machine (`VITE_COLLECTOR_URL=http://127.0.0.1:8766`). See
+`docs/ARCHITECTURE.md` §2d for what multi-machine deployment would need.
+
 ## Moving to a new server (or recovering from a crash)
 
 Nothing the collector needs is stored in this git repo - the certificate,
