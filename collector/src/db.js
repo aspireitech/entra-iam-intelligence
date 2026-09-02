@@ -61,7 +61,7 @@ export function appendSnapshot(tenantId, snapshot) {
     collected_at: snapshot.collectedAt,
     users: snapshot.users, applications: snapshot.applications, groups_count: snapshot.groups, devices: snapshot.devices,
     risky_users: snapshot.riskyUsers, privileged_users: snapshot.privilegedUsers, stale_users: snapshot.staleUsers,
-    mfa_missing: snapshot.mfaMissing, credential_expiring_soon: snapshot.credentialExpiry?.expiringSoon ?? null,
+    mfa_missing: snapshot.mfa?.missing ?? null, credential_expiring_soon: snapshot.credentialExpiry?.expiringSoon ?? null,
     license_purchased: snapshot.licenses?.totalPurchased ?? null, license_consumed: snapshot.licenses?.totalConsumed ?? null,
     toxic_combinations: snapshot.toxicCombinationsCount ?? null,
   });

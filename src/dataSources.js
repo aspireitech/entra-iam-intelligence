@@ -70,3 +70,8 @@ async function collectorGet(path){
 export const getTenantDelta=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/delta?days=${days}`);
 export const getTenantHistory=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/history?days=${days}`);
 export const getAppEvents=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/app-events?days=${days}`);
+// The full rich snapshot for one tenant, as last collected by the collector - reading
+// this is a local SQLite-backed read, not a Graph call, so it's safe to poll far more
+// often than the direct-Graph live view. {ok:false} (not configured, tenant not yet
+// tracked, or unreachable) is the caller's signal to fall back to a live Graph fetch.
+export const getTenantSnapshotFromCollector=(tenantId)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/snapshot`);
