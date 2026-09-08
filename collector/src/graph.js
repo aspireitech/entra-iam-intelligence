@@ -5,7 +5,13 @@ const GRAPH_BASE = 'https://graph.microsoft.com';
 async function graphGet(token, path, version = 'v1.0') {
   const url = path.startsWith('https://') ? path : `${GRAPH_BASE}/${version}${path}`;
   const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual' },
+    // A browser always sends an Accept-Language header on every request; Node's
+    // fetch sends none at all. That's invisible almost everywhere, but the PIM
+    // endpoints (roleEligibilityScheduleInstances) throw a 400
+    // CultureNotFoundException ("* is an invalid culture identifier") server-side
+    // when it's absent - confirmed as a known Graph PIM quirk, not specific to
+    // this tenant. Harmless to send everywhere else, so it's not conditional.
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual', 'Accept-Language': 'en-US' },
   });
   if (!response.ok) {
     const body = await response.text();
