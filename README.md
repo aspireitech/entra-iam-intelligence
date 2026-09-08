@@ -6,7 +6,18 @@ A vendor-neutral identity intelligence command center. The first production conn
 
 ## Current status: live Microsoft Entra connector
 
-The dashboard is wired to real, delegated Microsoft Graph queries — **there is no demo/mock data in the live app.** When a metric can't be retrieved (missing permission, unsupported API, no data yet) the UI shows `—` or `Permission required` rather than a fabricated value. See `docs/PHASE-1-2-3-TEST-MATRIX.md` for the full scope-by-scope validation matrix, and `docs/ARCHITECTURE.md` for system diagrams, data flow, and a full per-panel reference of where every metric comes from and what its colors mean.
+The dashboard is wired to real, delegated Microsoft Graph queries — **once connected to a tenant, there is no demo/mock data blended into a live result.** When a metric can't be retrieved (missing permission, unsupported API, no data yet) the UI shows `—` or `Permission required` rather than a fabricated value. See `docs/PHASE-1-2-3-TEST-MATRIX.md` for the full scope-by-scope validation matrix, and `docs/ARCHITECTURE.md` for system diagrams, data flow, and a full per-panel reference of where every metric comes from and what its colors mean.
+
+Separately, the sign-in screen offers an explicit, opt-in **Demo mode**
+("View demo dashboard (no Microsoft sign-in)") that never touches MSAL or
+the network at all — it renders the full dashboard against fabricated
+sample data (`src/demoData.js`) so the product is visible when Entra is
+unreachable, before an app registration exists, or just for a walkthrough.
+It's never silent about what it is: a persistent banner reads "Showing
+sample demo data" the entire time, and there's a one-click "Exit demo" back
+to real sign-in. This is additive to the no-fabrication guarantee above, not
+an exception to it — demo data only ever appears when explicitly requested,
+clearly labeled, and never mixed with a live tenant's numbers.
 
 Implemented:
 
@@ -18,7 +29,11 @@ Implemented:
 - Identity Health Score computed from live MFA/risk/stale-user/app-hygiene signals, not a static number
 - Progressive security-permission consent (ID Protection, privileged roles, Conditional Access) requested separately from core scopes
 - Licenses page: purchased/assigned/available seats per Microsoft 365 SKU, stale-licensed-account detection, reclamation recommendations (`Organization.Read.All`, progressive consent)
-- Application Credential Expiry: tenant app registrations' client secrets/certificates, with a ≤30-day rotation warning
+- Application Credential Expiry: tenant app registrations' client secrets/certificates, with a ≤30-day rotation warning, plus dedicated Expired Secrets/Expired Certs KPIs on the Applications page for pulling just what's already expired
+- Groups page: type/sync/membership donut breakdowns (cloud-only vs. on-prem synced, dynamic vs. assigned) alongside the filterable inventory
+- Devices page: compliance donut with an explicit "Unknown / not reported" bucket for devices with no compliance state at all, rather than folding them into non-compliant
+- Reports page: on-demand CSV/print export across every major data set, plus on-demand and scheduled (daily/weekly) email reports when the collector is running with SMTP configured (see `collector/README.md` "Email reports")
+- Demo mode: a full walkthrough of the dashboard with no Microsoft sign-in, for when Entra is unreachable or before an app registration exists (see above)
 - Auto-refresh every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s) while the tab is open and signed in
 - Data Sources control plane: Microsoft Entra (live), a read-only Active Directory agent (`agent/IAM-AD-Agent.ps1`), and an optional certificate-authenticated multi-tenant collector (`collector/`, see its README) powering a combined cross-tenant view; SailPoint and Saviynt are listed but not yet built, and are never shown as connected
 - Toxic Combinations: privileged users who also lack MFA, are flagged risky, or are stale 90+ days, cross-referenced by identity rather than shown as unrelated counts

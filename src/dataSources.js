@@ -75,3 +75,20 @@ export const getAppEvents=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURI
 // often than the direct-Graph live view. {ok:false} (not configured, tenant not yet
 // tracked, or unreachable) is the caller's signal to fall back to a live Graph fetch.
 export const getTenantSnapshotFromCollector=(tenantId)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/snapshot`);
+
+// Report scheduling/email-on-demand: these mutate collector state, so unlike the
+// reads above they need a POST/DELETE with a JSON body, not a bare GET.
+async function collectorRequest(path,{method='GET',body}={}){
+  const base=collectorBase();
+  if(!base) return {ok:false,reason:'Collector not configured (set VITE_COLLECTOR_URL).'};
+  try{
+    const response=await fetch(`${base}${path}`,{method,headers:{'Accept':'application/json','Content-Type':'application/json','X-IAM-Collector-Token':import.meta.env.VITE_COLLECTOR_TOKEN||''},body:body?JSON.stringify(body):undefined});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok) return {ok:false,reason:payload?.error||`Collector returned HTTP ${response.status}`};
+    return {ok:true,data:payload};
+  }catch(error){return {ok:false,reason:error.message||'Collector unreachable'};}
+}
+export const listReportSchedules=(tenantId)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/report-schedules`);
+export const createReportSchedule=(tenantId,reportId,frequency,recipients)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/report-schedules`,{method:'POST',body:{reportId,frequency,recipients}});
+export const deleteReportSchedule=(tenantId,scheduleId)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/report-schedules/${scheduleId}`,{method:'DELETE'});
+export const sendReportNow=(tenantId,reportId,recipients)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/reports/${reportId}/send`,{method:'POST',body:{recipients}});
