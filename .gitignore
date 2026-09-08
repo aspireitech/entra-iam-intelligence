@@ -5,3 +5,10 @@ dist/
 !.env.example
 .DS_Store
 .vscode/
+
+# Server-local IIS collector reverse-proxy rule (see collector/README.md
+# "Expose it to the dashboard when it's opened remotely") - deliberately not
+# committed, same reasoning as .env.production: a <rewrite> section fails the
+# whole IIS site with a 500 until the URL Rewrite/ARR modules are installed,
+# so this must never land on a server that hasn't done that step yet.
+public/web.config

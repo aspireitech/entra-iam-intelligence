@@ -227,9 +227,21 @@ access control is the `X-IAM-Collector-Token` header, so that would put an
 unencrypted, weakly-gated endpoint directly on the network.
 
 Instead, reverse-proxy it through the dashboard's own IIS site, reusing its
-existing HTTPS certificate. `public/web.config` (copied into `dist\` by
-every `npm run build`) already ships the rewrite rule; it just needs two
-IIS modules installed once per server, and ARR's proxy feature enabled once:
+existing HTTPS certificate.
+
+**Install the two IIS modules and enable proxying *before* creating the
+`web.config` below - not after.** A `<rewrite>` section in `web.config` is
+not something IIS silently ignores when the URL Rewrite module isn't
+installed: it's an unrecognized configuration section, and IIS fails the
+*entire site* with a generic `500 - Internal server error` - every page,
+not just the proxied path - until either the module is installed or the
+file is removed. This isn't hypothetical; it's exactly what happened the
+first time this was shipped as a repo-tracked file that landed in `dist\`
+on a server that hadn't done this section yet. That's also why this file is
+**not** committed to the repo or auto-copied by the build (unlike most of
+`public/`) - create it locally on each server, only once you're ready to
+turn the proxy on, the same way `.env.production` is created locally rather
+than committed.
 
 ```powershell
 # From an elevated PowerShell prompt. Confirm the current release at
@@ -246,7 +258,7 @@ Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\arr.msi`" /quiet /norest
 
 # ARR installs with proxying disabled by default - enable it server-wide (a
 # no-op, not a wildcard route: only requests matching a site's own rewrite
-# rules, like the one in web.config, ever get proxied anywhere):
+# rules, like the one in web.config below, ever get proxied anywhere):
 Import-Module WebAdministration
 Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/proxy" -name "enabled" -value "True"
 
@@ -254,9 +266,33 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.w
 iisreset
 ```
 
+Only now, with both modules installed and IIS restarted, create the rewrite
+rule - in `public\web.config` in the repo checkout, so it survives every
+future `npm run build` on *this* server (Vite copies everything in `public\`
+into `dist\` as-is):
+
+```powershell
+Set-Content -Path public\web.config -Encoding UTF8 -Value @'
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <rewrite>
+      <rules>
+        <rule name="Collector API reverse proxy" stopProcessing="true">
+          <match url="^collector-api/(.*)" />
+          <action type="Rewrite" url="http://127.0.0.1:8766/{R:1}" />
+        </rule>
+      </rules>
+    </rewrite>
+  </system.webServer>
+</configuration>
+'@
+```
+
 Then point the dashboard at the proxied path instead of the raw loopback
 address, and rebuild (this bakes `VITE_COLLECTOR_URL` into the static JS at
-build time, same as any other `.env.production` change):
+build time, same as any other `.env.production` change, and copies the
+`web.config` above into `dist\` in the same step):
 
 ```env
 VITE_COLLECTOR_URL=https://<your-dashboard-domain>/collector-api
@@ -267,7 +303,7 @@ VITE_COLLECTOR_TOKEN=<same collectorToken as tenants.json>
 npm run build
 ```
 
-Validate: `Invoke-WebRequest -Uri "https://<your-dashboard-domain>/collector-api/health" -Headers @{ "X-IAM-Collector-Token" = "<collectorToken>" }` should return the same JSON the collector's own `http://127.0.0.1:8766/health` returns locally on the server. A 404 usually means URL Rewrite/ARR aren't installed or IIS hasn't been reset since; a 502 usually means the collector service itself isn't running.
+Validate: `Invoke-WebRequest -Uri "https://<your-dashboard-domain>/collector-api/health" -Headers @{ "X-IAM-Collector-Token" = "<collectorToken>" }` should return the same JSON the collector's own `http://127.0.0.1:8766/health` returns locally on the server. A 404 usually means URL Rewrite/ARR aren't installed or IIS hasn't been reset since; a 502 usually means the collector service itself isn't running; a **500 on the dashboard's own home page** means `web.config` was created before the modules were installed - remove `dist\web.config` (and `public\web.config`, so the next build doesn't reintroduce it) to recover immediately, then redo the module install first.
 
 ## Moving to a new server (or recovering from a crash)
 

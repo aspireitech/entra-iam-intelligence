@@ -207,16 +207,25 @@ The dashboard SPA runs in the *visitor's* browser, not on the server, so
 someone opens the dashboard from the collector's own machine - the common
 production case (dashboard served over a public domain, opened from an
 admin's laptop) needs a real path from that browser to the loopback-only
-collector. `public/web.config` ships exactly that path: an IIS URL
-Rewrite/ARR reverse-proxy rule forwarding `/collector-api/*` on the
-dashboard's own HTTPS site to `http://127.0.0.1:8766/*`. IIS itself makes
-the loopback call server-side - the visitor's browser only ever talks to
-the already-trusted `https://<dashboard-domain>/collector-api`, reusing
-the site's existing TLS certificate and adding no new open port. See
+collector. An IIS URL Rewrite/ARR reverse-proxy rule forwarding
+`/collector-api/*` on the dashboard's own HTTPS site to
+`http://127.0.0.1:8766/*` is that path - IIS itself makes the loopback call
+server-side, so the visitor's browser only ever talks to the
+already-trusted `https://<dashboard-domain>/collector-api`, reusing the
+site's existing TLS certificate and adding no new open port. See
 `collector/README.md` "Expose it to the dashboard" for the exact
-install/enable steps (URL Rewrite + ARR modules, enabling ARR's proxy
-feature once). Without that reverse proxy in place, treat
-`VITE_COLLECTOR_URL` as same-machine-only.
+install/enable steps and the `web.config` rule itself.
+
+**This rule is deliberately not a file this repo ships or auto-copies into
+`dist\`.** A `<rewrite>` section in `web.config` is an unrecognized IIS
+configuration section until the URL Rewrite module is installed, and an
+unrecognized section fails IIS's config parse for the *entire site* - every
+page returns `500 - Internal server error`, not just the proxied path -
+until the module is installed or the file is removed. That failure mode is
+why `public/web.config` is `.gitignore`d rather than committed: create it
+locally, per server, only after installing the modules (same reasoning as
+`.env.production` staying uncommitted). Without that reverse proxy in
+place, treat `VITE_COLLECTOR_URL` as same-machine-only.
 
 ## 3. Module map
 
