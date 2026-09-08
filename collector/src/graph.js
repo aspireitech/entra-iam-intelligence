@@ -133,7 +133,7 @@ export async function collectTenant(tenant, config) {
   const staleCutoff = Date.now() - 90 * 86400000;
   const now = Date.now();
 
-  const [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, signInTrend] = await Promise.all([
+  const [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, signInTrend, groupRecordsResult] = await Promise.all([
     graphGetOptional(token, '/organization?$select=id,displayName,verifiedDomains'),
     graphGetOptional(token, '/applications?$count=true&$top=1'),
     graphGetOptional(token, '/users?$count=true&$top=1'),
@@ -143,6 +143,7 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`),
     graphGetOptional(token, '/auditLogs/signIns?$top=50&$orderby=createdDateTime desc'),
     dailySignIns(token, 7),
+    graphGetAllPagesOptional(token, '/groups?$top=999&$select=id,displayName,groupTypes,mailEnabled,securityEnabled,onPremisesSyncEnabled,membershipRule'),
   ]);
 
   // /roleManagement/directory/* and /identityProtection/riskyUsers both cap $top at
@@ -193,6 +194,15 @@ export async function collectTenant(tenant, config) {
   const staleUserList = userActivity.ok ? users.filter((u) => u.accountEnabled !== false && (!u.signInActivity?.lastSignInDateTime || new Date(u.signInActivity.lastSignInDateTime).getTime() < staleCutoff)) : [];
   const staleUsers = userActivity.ok ? staleUserList.length : null;
   const userActivityList = userActivity.ok ? users.map((u) => ({ id: u.id, name: u.displayName || u.userPrincipalName, upn: u.userPrincipalName, enabled: u.accountEnabled, lastSignIn: u.signInActivity?.lastSignInDateTime || null })) : [];
+
+  // Group type/sync breakdown - see the identical comment in src/entraAuth.js.
+  const groupRecordsAvailable = groupRecordsResult.ok;
+  const groupRecords = groupRecordsResult.ok ? groupRecordsResult.data.value || [] : [];
+  const groupTypeLabel = (g) => (g.groupTypes || []).includes('Unified') ? 'Microsoft 365' : g.securityEnabled && g.mailEnabled ? 'Mail-Enabled Security' : g.securityEnabled ? 'Security' : g.mailEnabled ? 'Distribution' : 'Security';
+  const groupList = groupRecordsAvailable ? groupRecords.map((g) => ({ id: g.id, name: g.displayName, type: groupTypeLabel(g), dynamic: (g.groupTypes || []).includes('DynamicMembership'), onPremSynced: g.onPremisesSyncEnabled === true, membershipRule: g.membershipRule || null })) : [];
+  const cloudOnlyGroups = groupRecordsAvailable ? groupList.filter((g) => !g.onPremSynced).length : null;
+  const onPremSyncGroups = groupRecordsAvailable ? groupList.filter((g) => g.onPremSynced).length : null;
+  const dynamicGroups = groupRecordsAvailable ? groupList.filter((g) => g.dynamic).length : null;
 
   // Guests - see the identical comment in src/entraAuth.js.
   const guestList = userActivityAvailable ? users.filter((u) => u.userType === 'Guest').map((u) => ({ id: u.id, name: u.displayName || u.userPrincipalName, upn: u.userPrincipalName, enabled: u.accountEnabled, lastSignIn: u.signInActivity?.lastSignInDateTime || null })) : [];
@@ -285,7 +295,7 @@ export async function collectTenant(tenant, config) {
   ].filter(Boolean);
 
   const orgValue = org.ok ? (org.data.value || [])[0] : null;
-  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount];
+  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, groupRecordsResult];
 
   return {
     tenantId: tenant.id,
@@ -294,6 +304,11 @@ export async function collectTenant(tenant, config) {
     users: usersCountValue,
     applications: appsCount.ok ? appsCount.data['@odata.count'] : null,
     groups: groupsCount.ok ? groupsCount.data['@odata.count'] : null,
+    groupsAvailable: groupRecordsAvailable,
+    groupList,
+    cloudOnlyGroups,
+    onPremSyncGroups,
+    dynamicGroups,
     devices: devicesCount.ok ? devicesCount.data['@odata.count'] : null,
     signIns7d: signIns7d.ok ? signIns7d.data['@odata.count'] : null,
     riskySignIns7d: riskySignIns7d.ok ? riskySignIns7d.data['@odata.count'] : null,
