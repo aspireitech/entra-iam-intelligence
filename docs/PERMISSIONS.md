@@ -21,7 +21,7 @@ needs them (progressive consent — see `src/entraAuth.js`).
 | `User.Read` | Delegated | User | Sign in, identify operator | `/me` | Auth gate |
 | `User.Read.All` | Delegated | Admin | User inventory, manager relationships, license assignment, guest/member (`userType`) | `/users`, `/users?$expand=manager` | Total Users, Stale Enabled Users, Users Without Manager, License page, Guests page |
 | `Application.Read.All` | Delegated | Admin | App/service-principal inventory and credentials, service principal population (incl. managed identities), tenant-wide application permission grants to Microsoft Graph | `/applications`, `/reports/servicePrincipalSignInActivities` (beta), `/servicePrincipals`, `/servicePrincipals/{graphSpId}/appRoleAssignedTo` | Total Applications, Application Usage buckets, Application Credential Expiry, Non-Human Identities, App Consent (application grants half) |
-| `Group.Read.All` | Delegated | Admin | Group inventory | `/groups` | Total Groups |
+| `Group.Read.All` | Delegated | Admin | Group inventory, type (Security/Microsoft 365/Distribution), dynamic-membership and on-prem-sync status | `/groups` | Groups page (Total, Cloud-Only, On-Prem Synced, Dynamic) |
 | `Device.Read.All` | Delegated | Admin | Device inventory | `/devices` | Active Devices |
 | `AuditLog.Read.All` | Delegated | Admin | Sign-in/audit telemetry, MFA registration report, legacy/basic-auth sign-in detection (`clientAppUsed`) | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails` | Sign-ins (7D), Recent Activity, Sign-in trend, MFA gap count, Legacy Authentication page |
 | `IdentityRiskyUser.Read.All` | Delegated | Admin | Requested separately | `/identityProtection/riskyUsers` | Risky Users, Identity Risk Overview |
@@ -45,7 +45,7 @@ registration **every connected tenant's own admin must grant it separately**.
 |---|---|---|
 | `User.Read.All` | User inventory, stale/manager signals, license assignment, guest/member breakdown | `/users` |
 | `Application.Read.All` | App/service-principal inventory, credential expiry, service principal population | `/applications`, `/servicePrincipals` |
-| `Group.Read.All` | Group inventory | `/groups` |
+| `Group.Read.All` | Group inventory, type, dynamic-membership and on-prem-sync status | `/groups` |
 | `Device.Read.All` | Device inventory | `/devices` |
 | `AuditLog.Read.All` | Sign-in counts, MFA registration report, new-application creation events (actor: user vs. application), legacy/basic-auth sign-in detection | `/auditLogs/signIns`, `/reports/authenticationMethods/userRegistrationDetails`, `/auditLogs/directoryAudits` |
 | `IdentityRiskyUser.Read.All` | Risky users | `/identityProtection/riskyUsers` |
@@ -57,7 +57,8 @@ Never requested: any `.ReadWrite` application permission, `Directory.Read.All`,
 or `Mail.Read`/`Files.Read.All`-class permissions unrelated to identity.
 
 **Collector parity**: Guests, Privileged Access (PIM), Legacy Authentication,
-and the Conditional Access MFA coverage check are now computed identically
+Groups (type/sync/dynamic-membership breakdown), and the Conditional Access
+MFA coverage check are now computed identically
 in both `src/entraAuth.js` (browser live view) and `collector/src/graph.js`
 `collectTenant()` - these pages work the same whether the dashboard is
 reading from the collector or from a direct live Graph call. **App Consent

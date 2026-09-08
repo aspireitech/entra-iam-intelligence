@@ -262,7 +262,21 @@ function ConditionalAccessDetailPage({data,onSecurity}){
 }
 
 function GroupsDetailPage({data}){
-  return <div className="source-page"><section className="kpis"><div className="kpi"><div className="kpi-icon">♧</div><div><div className="kpi-title">Total Groups</div><div className="kpi-value">{fmt(data.groups)}</div><div className="kpi-change"><span>Live Graph query</span></div></div></div></section><section className="grid top-grid single"><Card title="Group Detail"><div className="empty-state large">Per-group membership and type breakdown isn't built yet - the count above is a live /groups query, not a placeholder. Full group detail is a planned next step.</div></Card></section></div>;
+  const [q,setQ]=useFilter();const [sync,setSync]=useState('all');const [type,setType]=useState('all');
+  const groups=data.groupList||[];
+  const filtered=groups.filter(g=>(sync==='all'||(sync==='cloud'?!g.onPremSynced:g.onPremSynced))&&(type==='all'||(type==='dynamic'?g.dynamic:g.type===type))&&(!q||g.name.toLowerCase().includes(q.toLowerCase())));
+  if(!data.groupsAvailable)return <div className="source-page"><Kpis items={[['Total Groups',data.groups,'♧']]}/><div className="empty-state large">Group type/sync breakdown requires Group.Read.All to return the full group list, not just a count - permission may be missing, or the query failed. The Total Groups count above still comes from a separate live query.</div></div>;
+  return <div className="source-page">
+    <Kpis items={[['Total Groups',data.groups,'♧',()=>{setSync('all');setType('all');}],['Cloud-Only',data.cloudOnlyGroups,'☁',()=>setSync('cloud')],['On-Prem Synced',data.onPremSyncGroups,'⇄',()=>setSync('onprem')],['Dynamic (Smart) Groups',data.dynamicGroups,'◐',()=>setType('dynamic')]]}/>
+    <section className="grid top-grid single"><Card title="Group Inventory">
+      <FilterBar q={q} onQ={setQ} placeholder="Search group name…" count={filtered.length} total={groups.length} exportRows={filtered} exportColumns={[{label:'Group',value:'name'},{label:'Type',value:'type'},{label:'Membership',value:g=>g.dynamic?'Dynamic':'Assigned'},{label:'Sync',value:g=>g.onPremSynced?'Synced from on-prem':'Cloud-only'},{label:'Membership Rule',value:g=>g.membershipRule||''}]} exportFilename="groups">
+        <select className="filter-select" value={type} onChange={e=>setType(e.target.value)}><option value="all">All types</option><option value="Security">Security</option><option value="Microsoft 365">Microsoft 365</option><option value="Mail-Enabled Security">Mail-Enabled Security</option><option value="Distribution">Distribution</option><option value="dynamic">Dynamic membership only</option></select>
+        <select className="filter-select" value={sync} onChange={e=>setSync(e.target.value)}><option value="all">All sync states</option><option value="cloud">Cloud-only</option><option value="onprem">Synced from on-prem</option></select>
+      </FilterBar>
+      <div className="license-table"><table><thead><tr><th>Group</th><th>Type</th><th>Membership</th><th>Sync</th></tr></thead><tbody>{filtered.slice(0,300).map(g=><tr key={g.id}><td>{g.name}</td><td>{g.type}</td><td>{g.dynamic?'Dynamic':'Assigned'}</td><td>{g.onPremSynced?'Synced from on-prem':'Cloud-only'}</td></tr>)}</tbody></table></div>
+      <div className="disclaimer">Type is derived from Graph's groupTypes/securityEnabled/mailEnabled fields, not a single flag - a "Microsoft 365" group is one where groupTypes includes Unified. Dynamic membership groups are evaluated automatically by Entra from their membership rule; every other group here has manually assigned members. Source: /groups.</div>
+    </Card></section>
+  </div>;
 }
 
 function GuestsPage({data,onNavigate}){
