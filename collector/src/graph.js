@@ -207,7 +207,8 @@ export async function collectTenant(tenant, config) {
     : null;
 
   const managerAvailable = managerRecords.ok;
-  const usersWithoutManager = managerAvailable ? (managerRecords.data.value || []).filter((u) => u.accountEnabled !== false && !u.manager).length : null;
+  const usersWithoutManagerList = managerAvailable ? (managerRecords.data.value || []).filter((u) => u.accountEnabled !== false && !u.manager).map((u) => ({ id: u.id, name: u.displayName || u.userPrincipalName, upn: u.userPrincipalName })) : [];
+  const usersWithoutManager = managerAvailable ? usersWithoutManagerList.length : null;
 
   const registrationAvailable = registration.ok;
   const registrationList = registration.ok ? registration.data.value || [] : [];
@@ -247,7 +248,7 @@ export async function collectTenant(tenant, config) {
   if (managerAvailable) for (const u of managerRecords.data.value || []) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (userActivityAvailable) for (const u of users) if (!nameById.has(u.id)) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (registrationAvailable) for (const u of registrationList) if (!nameById.has(u.id)) nameById.set(u.id, u.userDisplayName || u.userPrincipalName);
-  const privilegedAccess = { available: roleAssignments.ok && roleEligibility.ok, activeCount: privilegedUsers, eligibleCount: roleEligibility.ok ? eligiblePrincipalIds.size : null, eligibleNotActive: eligibleNotActiveIds.map((id) => ({ id, name: nameById.get(id) || id })), activeNotEligible: activeNotEligibleIds.map((id) => ({ id, name: nameById.get(id) || id })) };
+  const privilegedAccess = { available: roleAssignments.ok && roleEligibility.ok, activeCount: privilegedUsers, eligibleCount: roleEligibility.ok ? eligiblePrincipalIds.size : null, eligibleNotActive: eligibleNotActiveIds.map((id) => ({ id, name: nameById.get(id) || id })), activeNotEligible: activeNotEligibleIds.map((id) => ({ id, name: nameById.get(id) || id })), activeList: roleAssignments.ok ? [...privilegedPrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [], eligibleList: roleEligibility.ok ? [...eligiblePrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [] };
   const mfaMissingIds = new Set(mfaMissingUsers.map((u) => u.id));
   const riskyUserRecords = riskyUsers.ok ? riskyUsers.data.value || [] : [];
   const riskyIds = new Set(riskyUserRecords.map((u) => u.id));
@@ -320,6 +321,7 @@ export async function collectTenant(tenant, config) {
     userActivityAvailable,
     userActivityList,
     usersWithoutManager,
+    usersWithoutManagerList,
     privilegedAccess,
     guests,
     legacyAuth,

@@ -187,7 +187,7 @@ in the top-level `README.md`.
 
 ## 5. Point the SPA at it
 
-In the SPA's `.env.local`:
+In the SPA's `.env.local` (or `.env.production` for a real deployment):
 
 ```env
 VITE_COLLECTOR_URL=http://127.0.0.1:8766
@@ -214,6 +214,60 @@ it never goes blank because of this.
 This only works when the browser can reach the collector - by default that
 means the same machine (`VITE_COLLECTOR_URL=http://127.0.0.1:8766`). See
 `docs/ARCHITECTURE.md` §2d for what multi-machine deployment would need.
+
+### Expose it to the dashboard when it's opened remotely
+
+The common production case - the dashboard served from a public domain and
+opened from an admin's laptop, even when the collector runs on that same
+server - is **not** the same-machine case above: it's the visitor's browser,
+not the server, that would have to reach `127.0.0.1:8766`, and a laptop's
+own loopback address obviously isn't the server's. Don't "fix" this by
+binding the collector to `0.0.0.0` - it only speaks plain HTTP and its only
+access control is the `X-IAM-Collector-Token` header, so that would put an
+unencrypted, weakly-gated endpoint directly on the network.
+
+Instead, reverse-proxy it through the dashboard's own IIS site, reusing its
+existing HTTPS certificate. `public/web.config` (copied into `dist\` by
+every `npm run build`) already ships the rewrite rule; it just needs two
+IIS modules installed once per server, and ARR's proxy feature enabled once:
+
+```powershell
+# From an elevated PowerShell prompt. Confirm the current release at
+# https://www.iis.net/downloads/microsoft/url-rewrite and
+# https://www.iis.net/downloads/microsoft/application-request-routing
+# before relying on these exact URLs - they're the long-standing official
+# Microsoft download-center links as of this writing, unchanged since ARR 3.0/
+# URL Rewrite 2.1 shipped, but check if either 404s.
+Invoke-WebRequest -Uri "https://download.microsoft.com/download/1/2/8/128E2E22-C1B9-44A4-BE2A-5859ED1D4592/rewrite_amd64_en-US.msi" -OutFile "$env:TEMP\urlrewrite.msi"
+Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\urlrewrite.msi`" /quiet /norestart" -Wait
+
+Invoke-WebRequest -Uri "https://download.microsoft.com/download/e/9/8/e9849d6a-020e-47e4-9fd0-a023e99b54eb/requestRouter_amd64.msi" -OutFile "$env:TEMP\arr.msi"
+Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\arr.msi`" /quiet /norestart" -Wait
+
+# ARR installs with proxying disabled by default - enable it server-wide (a
+# no-op, not a wildcard route: only requests matching a site's own rewrite
+# rules, like the one in web.config, ever get proxied anywhere):
+Import-Module WebAdministration
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/proxy" -name "enabled" -value "True"
+
+# IIS needs a restart to pick up newly installed modules:
+iisreset
+```
+
+Then point the dashboard at the proxied path instead of the raw loopback
+address, and rebuild (this bakes `VITE_COLLECTOR_URL` into the static JS at
+build time, same as any other `.env.production` change):
+
+```env
+VITE_COLLECTOR_URL=https://<your-dashboard-domain>/collector-api
+VITE_COLLECTOR_TOKEN=<same collectorToken as tenants.json>
+```
+
+```powershell
+npm run build
+```
+
+Validate: `Invoke-WebRequest -Uri "https://<your-dashboard-domain>/collector-api/health" -Headers @{ "X-IAM-Collector-Token" = "<collectorToken>" }` should return the same JSON the collector's own `http://127.0.0.1:8766/health` returns locally on the server. A 404 usually means URL Rewrite/ARR aren't installed or IIS hasn't been reset since; a 502 usually means the collector service itself isn't running.
 
 ## Moving to a new server (or recovering from a crash)
 
