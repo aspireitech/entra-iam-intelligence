@@ -26,6 +26,12 @@ async function graphGetOptional(token, path, version) {
   try {
     return { ok: true, data: await graphGet(token, path, version) };
   } catch (error) {
+    // Previously swallowed with no trace anywhere - a dashboard page or report
+    // going quietly "unavailable" gave no way to tell why short of guessing.
+    // error.message already carries the status code and Graph's own response
+    // body (see graphGet above), so this alone is enough to diagnose a 401
+    // (consent revoked), 403 (permission missing), or 429 (throttled).
+    console.warn(`[collector] ${error.message}`);
     return { ok: false, error };
   }
 }
@@ -50,6 +56,7 @@ async function graphGetAllPagesOptional(token, path, version) {
   try {
     return { ok: true, data: await graphGetAllPages(token, path, version) };
   } catch (error) {
+    console.warn(`[collector] ${error.message}`);
     return { ok: false, error };
   }
 }
@@ -205,7 +212,7 @@ export async function collectTenant(tenant, config) {
   const groupRecordsAvailable = groupRecordsResult.ok;
   const groupRecords = groupRecordsResult.ok ? groupRecordsResult.data.value || [] : [];
   const groupTypeLabel = (g) => (g.groupTypes || []).includes('Unified') ? 'Microsoft 365' : g.securityEnabled && g.mailEnabled ? 'Mail-Enabled Security' : g.securityEnabled ? 'Security' : g.mailEnabled ? 'Distribution' : 'Security';
-  const groupList = groupRecordsAvailable ? groupRecords.map((g) => ({ id: g.id, name: g.displayName, type: groupTypeLabel(g), dynamic: (g.groupTypes || []).includes('DynamicMembership'), onPremSynced: g.onPremisesSyncEnabled === true, membershipRule: g.membershipRule || null })) : [];
+  const groupList = groupRecordsAvailable ? groupRecords.map((g) => ({ id: g.id, name: g.displayName || '(no name)', type: groupTypeLabel(g), dynamic: (g.groupTypes || []).includes('DynamicMembership'), onPremSynced: g.onPremisesSyncEnabled === true, membershipRule: g.membershipRule || null })) : [];
   const cloudOnlyGroups = groupRecordsAvailable ? groupList.filter((g) => !g.onPremSynced).length : null;
   const onPremSyncGroups = groupRecordsAvailable ? groupList.filter((g) => g.onPremSynced).length : null;
   const dynamicGroups = groupRecordsAvailable ? groupList.filter((g) => g.dynamic).length : null;

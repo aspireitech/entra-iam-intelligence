@@ -116,7 +116,7 @@ export async function getTenantSnapshot(){
  // Microsoft 365 groups; otherwise securityEnabled/mailEnabled distinguish a plain
  // security group from a mail-enabled security group or distribution list.
  const groupTypeLabel=g=>(g.groupTypes||[]).includes('Unified')?'Microsoft 365':g.securityEnabled&&g.mailEnabled?'Mail-Enabled Security':g.securityEnabled?'Security':g.mailEnabled?'Distribution':'Security';
- const groupList=groupRecordsAvailable?groupRecords.map(g=>({id:g.id,name:g.displayName,type:groupTypeLabel(g),dynamic:(g.groupTypes||[]).includes('DynamicMembership'),onPremSynced:g.onPremisesSyncEnabled===true,membershipRule:g.membershipRule||null})):[];
+ const groupList=groupRecordsAvailable?groupRecords.map(g=>({id:g.id,name:g.displayName||'(no name)',type:groupTypeLabel(g),dynamic:(g.groupTypes||[]).includes('DynamicMembership'),onPremSynced:g.onPremisesSyncEnabled===true,membershipRule:g.membershipRule||null})):[];
  const cloudOnlyGroups=groupRecordsAvailable?groupList.filter(g=>!g.onPremSynced).length:null;
  const onPremSyncGroups=groupRecordsAvailable?groupList.filter(g=>g.onPremSynced).length:null;
  const dynamicGroups=groupRecordsAvailable?groupList.filter(g=>g.dynamic).length:null;
