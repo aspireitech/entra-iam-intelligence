@@ -549,8 +549,15 @@ function timeAgoLabel(seconds){
   return `${Math.round(seconds/86400)}d ago`;
 }
 function certUrgencyClass(days){return days==null?'':days<=7?'critical':days<=30?'warning':'';}
+function formatDuration(minutes){if(minutes<60)return `${Math.round(minutes)}m`;const h=Math.floor(minutes/60);const m=Math.round(minutes%60);return m?`${h}h ${m}m`:`${h}h`;}
+function median(nums){if(!nums.length)return null;const s=[...nums].sort((a,b)=>a-b);const mid=Math.floor(s.length/2);return s.length%2?s[mid]:(s[mid-1]+s[mid])/2;}
+// A gap is "worth flagging" once it's meaningfully bigger than this tenant's own
+// normal cadence, not a fixed number - a tenant polled every 5 minutes and one
+// polled every 15 have different definitions of "on time". Floor of 20 minutes so
+// a couple of jittered/ordinary ticks in a row never falsely reads as a gap.
+function flagGap(minutes,med){return med!=null&&minutes>Math.max(med*2,20);}
 const HEALTH_POLL_SECONDS=15;
-function SystemHealthPage({tenantId,collectorConfigured}){
+function SystemHealthPage({tenantId,collectorConfigured,onNavigate}){
   const [health,setHealth]=useState(null);
   const [error,setError]=useState('');
   const [loading,setLoading]=useState(true);
@@ -593,6 +600,15 @@ function SystemHealthPage({tenantId,collectorConfigured}){
   const nearestCertDays=tenants.reduce((min,t)=>t.certExpiresInDays!=null&&(min==null||t.certExpiresInDays<min)?t.certExpiresInDays:min,null);
   const overallHealthy=health?.status==='ok';
 
+  // historyPoints arrives oldest-first (see db.js getHistory) - compute each row's
+  // gap from the one before it while still in that order, so "gap since previous"
+  // means what it says, then reverse only for display (newest job first).
+  const recentAsc=(historyPoints||[]).slice(-20);
+  const gapMinutes=recentAsc.map((p,i)=>i===0?null:(new Date(p.collected_at)-new Date(recentAsc[i-1].collected_at))/60000);
+  const typicalGap=median(gapMinutes.filter(g=>g!=null));
+  const jobRows=recentAsc.map((p,i)=>({...p,gapMinutes:gapMinutes[i],gapFlagged:gapMinutes[i]!=null&&flagGap(gapMinutes[i],typicalGap)})).reverse();
+  const gapCount=jobRows.filter(r=>r.gapFlagged).length;
+
   return <div className="source-page">
     <section className="kpis">
       <div className="kpi">
@@ -607,10 +623,13 @@ function SystemHealthPage({tenantId,collectorConfigured}){
         <div className="kpi-icon" style={nearestCertDays!=null&&nearestCertDays<=30?{color:'#f26666',background:'rgba(218,63,63,.13)'}:{}}>⚿</div>
         <div><div className="kpi-title">Nearest Cert Expiry</div><div className="kpi-value">{nearestCertDays!=null?`${nearestCertDays}d`:'—'}</div><div className="kpi-change"><span>Graph app-only authentication</span></div></div>
       </div>
-      <div className="kpi">
+      {onNavigate?<button className="kpi kpi-link" onClick={()=>onNavigate('Reports')}>
+        <div className="kpi-icon">✉</div>
+        <div><div className="kpi-title">Email Reports</div><div className="kpi-value" style={{fontSize:18}}>{health?.emailConfigured?'Configured':'Not set up'}</div><div className="kpi-change"><span>{health?.emailConfigured?'View scheduled reports →':'Set up in Reports →'}</span></div></div>
+      </button>:<div className="kpi">
         <div className="kpi-icon">✉</div>
         <div><div className="kpi-title">Email Reports</div><div className="kpi-value" style={{fontSize:18}}>{health?.emailConfigured?'Configured':'Not set up'}</div><div className="kpi-change"><span>Scheduled report delivery</span></div></div>
-      </div>
+      </div>}
     </section>
     <section className="grid top-grid single">
       <Card title="Tenant Collection Health">
@@ -636,11 +655,22 @@ function SystemHealthPage({tenantId,collectorConfigured}){
     <section className="grid top-grid single">
       <Card title="Recent Snapshot Jobs (last 7 days)">
         {historyPoints===null?<div className="empty-state">Loading job history…</div>:
-         !historyPoints.length?<div className="empty-state">No collection history yet for this tenant - check back after the first few scheduled cycles.</div>:
-         <div className="activity-card"><table><thead><tr><th>Collected At</th><th>Users</th><th>Applications</th><th>Groups</th><th>Devices</th><th>Risky Users</th></tr></thead><tbody>
-           {historyPoints.slice(-20).reverse().map((p,i)=><tr key={i}><td>{new Date(p.collected_at).toLocaleString()}</td><td>{fmt(p.users)}</td><td>{fmt(p.applications)}</td><td>{fmt(p.groups)}</td><td>{fmt(p.devices)}</td><td>{fmt(p.risky_users)}</td></tr>)}
-         </tbody></table></div>}
-        <div className="disclaimer">Each row is one completed scheduled collection cycle for this tenant. If the newest row is much older than expected, the collector's scheduler may be stuck - check the collector's own process/service logs.</div>
+         !historyPoints.length?<div className="empty-state">No collection history yet for this tenant - check back after the first few scheduled cycles.</div>:<>
+         <div style={{padding:'9px 14px 0',fontSize:9,color:gapCount?'#eea427':'#74899d'}}>
+           {jobRows.length} cycle{jobRows.length===1?'':'s'} shown • typical interval {typicalGap!=null?formatDuration(typicalGap):'—'}{gapCount?` • ${gapCount} gap${gapCount>1?'s':''} flagged below - see troubleshooting notes`:' • no gaps detected'}
+         </div>
+         <div className="activity-card"><table><thead><tr><th>Collected At</th><th>Gap</th><th>Users</th><th>Applications</th><th>Groups</th><th>Devices</th><th>Risky Users</th></tr></thead><tbody>
+           {jobRows.map((p,i)=><tr key={i}>
+             <td>{new Date(p.collected_at).toLocaleString()}</td>
+             <td className={p.gapFlagged?'high':undefined}>{p.gapMinutes==null?'—':p.gapFlagged?`⚠ ${formatDuration(p.gapMinutes)}`:`+${formatDuration(p.gapMinutes)}`}</td>
+             <td>{fmt(p.users)}</td><td>{fmt(p.applications)}</td><td>{fmt(p.groups)}</td><td>{fmt(p.devices)}</td><td>{fmt(p.risky_users)}</td>
+           </tr>)}
+         </tbody></table></div></>}
+        <div className="disclaimer">Each row is one completed scheduled collection cycle for this tenant; the Gap column is the time since the previous cycle, flagged (⚠, red) when it's more than double this tenant's typical interval. A flagged gap or a STALE tenant above almost always traces back to one of these, in order of likelihood:<br/>
+        1. <b>Certificate expired or unreadable</b> - check the Certificate Expiry card above first; an expired/missing cert blocks every collection cycle for that tenant.<br/>
+        2. <b>Consent or permission lost</b> - on the server running the collector, open <span className="mono">collector\logs\collector.err.log</span> and look for a Graph error on the failing tenant: <b>401</b> means the app registration's admin consent was revoked, <b>403</b> means a required Graph permission was removed - both need re-granting consent in Entra.<br/>
+        3. <b>Sustained Graph throttling (429)</b> - the collector retries automatically, but if 429s show up repeatedly in <span className="mono">collector.err.log</span> for a large tenant, the collection interval in tenants.json may be too aggressive.<br/>
+        4. <b>Service itself stopped/crashed</b> - if nothing useful is in collector.err.log, check <span className="mono">collector\logs\collector.out.log</span> for the last "collected at" line, then confirm the process is actually running: <span className="mono">Get-Service IAMIntelligenceCollector</span> (restart with <span className="mono">Restart-Service IAMIntelligenceCollector</span> once the underlying cause above is fixed).</div>
       </Card>
     </section>
   </div>;
@@ -733,7 +763,7 @@ function App(){
     else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data} collectorStatus={collectorStatus}/>;
     else if(active==='Risk Register')entraContent=<RiskRegisterPage data={data} collectorStatus={collectorStatus}/>;
     else if(active==='Reports')entraContent=<ReportsPage data={data} collectorStatus={collectorStatus}/>;
-    else if(active==='System Health')entraContent=<SystemHealthPage tenantId={data.organization?.id} collectorConfigured={collectorStatus.configured}/>;
+    else if(active==='System Health')entraContent=<SystemHealthPage tenantId={data.organization?.id} collectorConfigured={collectorStatus.configured} onNavigate={chooseNav}/>;
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
     else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav} collectorStatus={collectorStatus}/>;
   }
