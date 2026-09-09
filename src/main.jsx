@@ -2,7 +2,7 @@ import React,{useEffect,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './styles.css';
 import {connectSecurityScopes,connectLicenseScopes,connectGovernanceScopes,getLicenseSnapshot,getAppConsentSnapshot,getSignInTrend,signOut} from './entraAuth.js';
-import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents,listReportSchedules,createReportSchedule,deleteReportSchedule,sendReportNow,listRiskRegister,upsertRiskRegisterEntry,deleteRiskRegisterEntry} from './dataSources.js';
+import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getCollectorHealth,getTenantDelta,getTenantHistory,getAppEvents,listReportSchedules,createReportSchedule,deleteReportSchedule,sendReportNow,listRiskRegister,upsertRiskRegisterEntry,deleteRiskRegisterEntry} from './dataSources.js';
 import {syncTenantData,getCachedOverview,getLocalSnapshot} from './liveTenantData.js';
 import {isDemoMode,exitDemoMode} from './demoMode.js';
 import {buildDemoSnapshot} from './demoData.js';
@@ -13,7 +13,7 @@ const NAV_GROUPS=[
   {section:'Directory',items:[['Users','♙'],['Guests','⚇'],['Groups','♧'],['Devices','▱'],['Applications','▦']]},
   {section:'Identity Risk',items:[['Risk Overview','◈'],['Privileged Access','♛'],['Non-Human Identities','⚶'],['Toxic Combinations','☠'],['Legacy Authentication','⌛'],['Sign-ins','↪'],['Conditional Access','◌'],['Alerts','⚑']]},
   {section:'Governance',items:[['Risk Register','▤'],['App Consent','⚿'],['Licenses','◫'],['Access Reviews','◐'],['Provisioning','⇄']]},
-  {section:'Admin',items:[['Audit Logs','▥'],['Reports','▧'],['Workflows','⚙'],['Data Explorer','⌕'],['Data Sources','◈'],['Settings','⚒']]},
+  {section:'Admin',items:[['Audit Logs','▥'],['Reports','▧'],['System Health','✚'],['Workflows','⚙'],['Data Explorer','⌕'],['Data Sources','◈'],['Settings','⚒']]},
 ];
 // Labels rendered in the sidebar but with no working detail view yet - shown as
 // a "Coming soon" placeholder on click instead of being hidden outright, so the
@@ -23,7 +23,7 @@ const PLACEHOLDER_LABELS=new Set(['Access Reviews','Provisioning','Audit Logs','
 // placeholder labels above (placeholders only make sense once real Entra
 // data is flowing, so they're scoped to the entra source).
 const NAV_BY_SOURCE={
-  entra:['Overview','Users','Guests','Groups','Devices','Applications','Risk Overview','Privileged Access','Non-Human Identities','Toxic Combinations','Legacy Authentication','Sign-ins','Conditional Access','Risk Register','App Consent','Licenses','Reports','Data Sources',...PLACEHOLDER_LABELS],
+  entra:['Overview','Users','Guests','Groups','Devices','Applications','Risk Overview','Privileged Access','Non-Human Identities','Toxic Combinations','Legacy Authentication','Sign-ins','Conditional Access','Risk Register','App Consent','Licenses','Reports','System Health','Data Sources',...PLACEHOLDER_LABELS],
   ad:['Overview','Data Sources'],
   combined:['Overview','Data Sources'],
   sailpoint:['Data Sources'],
@@ -537,6 +537,115 @@ function ReportsPage({data,collectorStatus}){
   </div>;
 }
 
+// GUI view of the collector's own /health endpoint - the visual counterpart to
+// running Invoke-WebRequest with the token header by hand. Polls independently
+// of the main dashboard refresh loop (its own interval, own token attach) since
+// this page is about the collection *job*, not the tenant snapshot it produces.
+function timeAgoLabel(seconds){
+  if(seconds==null)return 'never';
+  if(seconds<60)return `${Math.max(0,Math.round(seconds))}s ago`;
+  if(seconds<3600)return `${Math.round(seconds/60)}m ago`;
+  if(seconds<86400)return `${Math.round(seconds/3600)}h ago`;
+  return `${Math.round(seconds/86400)}d ago`;
+}
+function certUrgencyClass(days){return days==null?'':days<=7?'critical':days<=30?'warning':'';}
+const HEALTH_POLL_SECONDS=15;
+function SystemHealthPage({tenantId,collectorConfigured}){
+  const [health,setHealth]=useState(null);
+  const [error,setError]=useState('');
+  const [loading,setLoading]=useState(true);
+  const [lastChecked,setLastChecked]=useState(null);
+  const [historyPoints,setHistoryPoints]=useState(null);
+  useEffect(()=>{
+    if(!collectorConfigured)return;
+    let cancelled=false;
+    const check=async()=>{
+      const result=await getCollectorHealth();
+      if(cancelled)return;
+      if(result.ok){setHealth(result.data);setError('');}
+      else setError(result.reason||'Collector unreachable');
+      setLastChecked(new Date());
+      setLoading(false);
+    };
+    check();
+    const timer=setInterval(check,HEALTH_POLL_SECONDS*1000);
+    return()=>{cancelled=true;clearInterval(timer);};
+  },[collectorConfigured]);
+  useEffect(()=>{
+    if(!collectorConfigured||!tenantId){setHistoryPoints(collectorConfigured?null:[]);return;}
+    let cancelled=false;
+    getTenantHistory(tenantId,7).then(result=>{if(!cancelled)setHistoryPoints(result.ok?(result.data.points||[]):[]);});
+    return()=>{cancelled=true;};
+  },[collectorConfigured,tenantId]);
+
+  if(!collectorConfigured){
+    return <div className="source-page"><section className="grid top-grid single"><Card title="System Health"><div className="empty-state large">No collector is configured for this deployment (VITE_COLLECTOR_URL isn't set), so there's no background collection job to monitor here. This dashboard is reading live Microsoft Graph directly instead.</div></Card></section></div>;
+  }
+  if(loading&&!health){
+    return <div className="source-page"><div className="empty-state large">Checking collector health…</div></div>;
+  }
+  if(error&&!health){
+    return <div className="source-page"><section className="grid top-grid single"><Card title="System Health"><div className="empty-state large">Collector unreachable: {error}<br/>Confirm the collector service is running and that VITE_COLLECTOR_URL / VITE_COLLECTOR_TOKEN in .env.production are correct, then rebuild.</div></Card></section></div>;
+  }
+
+  const tenants=health?.tenants||[];
+  const staleCount=tenants.filter(t=>t.stale).length;
+  const nearestCertDays=tenants.reduce((min,t)=>t.certExpiresInDays!=null&&(min==null||t.certExpiresInDays<min)?t.certExpiresInDays:min,null);
+  const overallHealthy=health?.status==='ok';
+
+  return <div className="source-page">
+    <section className="kpis">
+      <div className="kpi">
+        <div className="kpi-icon" style={overallHealthy?{color:'#41c56b',background:'rgba(47,190,93,.14)'}:{color:'#eea427',background:'rgba(236,159,27,.14)'}}>{overallHealthy?'✓':'!'}</div>
+        <div><div className="kpi-title">Collector Status</div><div className="kpi-value" style={{fontSize:18,color:overallHealthy?'#6fd38b':'#eea427'}}>{overallHealthy?'Healthy':'Degraded'}</div><div className="kpi-change"><span>Checked {lastChecked?lastChecked.toLocaleTimeString():'—'} • every {HEALTH_POLL_SECONDS}s</span></div></div>
+      </div>
+      <div className="kpi">
+        <div className="kpi-icon">◈</div>
+        <div><div className="kpi-title">Tenants Tracked</div><div className="kpi-value">{fmt(tenants.length)}</div><div className="kpi-change"><span>{staleCount>0?`${staleCount} stale`:'All fresh'}</span></div></div>
+      </div>
+      <div className="kpi">
+        <div className="kpi-icon" style={nearestCertDays!=null&&nearestCertDays<=30?{color:'#f26666',background:'rgba(218,63,63,.13)'}:{}}>⚿</div>
+        <div><div className="kpi-title">Nearest Cert Expiry</div><div className="kpi-value">{nearestCertDays!=null?`${nearestCertDays}d`:'—'}</div><div className="kpi-change"><span>Graph app-only authentication</span></div></div>
+      </div>
+      <div className="kpi">
+        <div className="kpi-icon">✉</div>
+        <div><div className="kpi-title">Email Reports</div><div className="kpi-value" style={{fontSize:18}}>{health?.emailConfigured?'Configured':'Not set up'}</div><div className="kpi-change"><span>Scheduled report delivery</span></div></div>
+      </div>
+    </section>
+    <section className="grid top-grid single">
+      <Card title="Tenant Collection Health">
+        <div className="cred-list">
+          {tenants.map(t=><div className="cred-row" key={t.id}>
+            <div><strong>{t.displayName}</strong><span>{t.stale?'Snapshot is stale - the scheduled collection may be stuck or losing consent':'Snapshot is up to date'} • Last collected {timeAgoLabel(t.lastCollectedSecondsAgo)}</span></div>
+            <b className={t.stale?'critical':''}>{t.stale?'STALE':'FRESH'}</b>
+          </div>)}
+          {!tenants.length&&<div className="empty-state">No tenants configured on the collector.</div>}
+        </div>
+      </Card>
+    </section>
+    <section className="grid top-grid single">
+      <Card title="Certificate Expiry">
+        <div className="cred-list">
+          {tenants.map(t=><div className="cred-row" key={`cert-${t.id}`}>
+            <div><strong>{t.displayName}</strong><span>{t.certError?`Certificate error: ${t.certError}`:t.certExpiresAt?`Expires ${new Date(t.certExpiresAt).toLocaleDateString()}`:'No certificate info'}</span></div>
+            <b className={certUrgencyClass(t.certExpiresInDays)}>{t.certExpiresInDays!=null?`${t.certExpiresInDays}d`:'—'}</b>
+          </div>)}
+        </div>
+      </Card>
+    </section>
+    <section className="grid top-grid single">
+      <Card title="Recent Snapshot Jobs (last 7 days)">
+        {historyPoints===null?<div className="empty-state">Loading job history…</div>:
+         !historyPoints.length?<div className="empty-state">No collection history yet for this tenant - check back after the first few scheduled cycles.</div>:
+         <div className="activity-card"><table><thead><tr><th>Collected At</th><th>Users</th><th>Applications</th><th>Groups</th><th>Devices</th><th>Risky Users</th></tr></thead><tbody>
+           {historyPoints.slice(-20).reverse().map((p,i)=><tr key={i}><td>{new Date(p.collected_at).toLocaleString()}</td><td>{fmt(p.users)}</td><td>{fmt(p.applications)}</td><td>{fmt(p.groups)}</td><td>{fmt(p.devices)}</td><td>{fmt(p.risky_users)}</td></tr>)}
+         </tbody></table></div>}
+        <div className="disclaimer">Each row is one completed scheduled collection cycle for this tenant. If the newest row is much older than expected, the collector's scheduler may be stuck - check the collector's own process/service logs.</div>
+      </Card>
+    </section>
+  </div>;
+}
+
 function App(){
   const demoMode=isDemoMode();
   const localLoginMode=isLocalLoginMode();
@@ -624,6 +733,7 @@ function App(){
     else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data} collectorStatus={collectorStatus}/>;
     else if(active==='Risk Register')entraContent=<RiskRegisterPage data={data} collectorStatus={collectorStatus}/>;
     else if(active==='Reports')entraContent=<ReportsPage data={data} collectorStatus={collectorStatus}/>;
+    else if(active==='System Health')entraContent=<SystemHealthPage tenantId={data.organization?.id} collectorConfigured={collectorStatus.configured}/>;
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
     else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav} collectorStatus={collectorStatus}/>;
   }
