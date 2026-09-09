@@ -122,6 +122,12 @@ async function handleRequest(req, res, config) {
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/health') {
+      // "Is the process up" was never the useful question here - "is the
+      // scheduled collection actually still landing snapshots on time" is.
+      // A stuck/crash-looping scheduler, a tenant that lost admin consent, or
+      // a Graph auth failure all leave the process itself perfectly healthy
+      // while data quietly goes stale - this is what catches that.
+      const staleThresholdSeconds = Math.max(300, Number(config.intervalSeconds) || 900) * 2;
       const tenants = config.tenants.map((t) => {
         let cert = null;
         try {
@@ -129,9 +135,14 @@ async function handleRequest(req, res, config) {
         } catch (error) {
           cert = { error: error.message };
         }
-        return { id: t.id, displayName: t.displayName || t.id, certExpiresInDays: cert?.daysRemaining ?? null, certExpiresAt: cert?.expiresAt ?? null, certError: cert?.error };
+        const snap = loadSnapshot(t.id);
+        const lastCollectedAt = snap?.collectedAt ?? null;
+        const lastCollectedSecondsAgo = lastCollectedAt ? Math.round((Date.now() - new Date(lastCollectedAt).getTime()) / 1000) : null;
+        const stale = lastCollectedAt == null || lastCollectedSecondsAgo > staleThresholdSeconds;
+        return { id: t.id, displayName: t.displayName || t.id, certExpiresInDays: cert?.daysRemaining ?? null, certExpiresAt: cert?.expiresAt ?? null, certError: cert?.error, lastCollectedAt, lastCollectedSecondsAgo, stale };
       });
-      return json(res, 200, { status: 'ok', version: '0.1.0', tenantCount: config.tenants.length, tenants, emailConfigured: mailerConfigured(config), collectedAt: new Date().toISOString() });
+      const anyStale = tenants.some((t) => t.stale);
+      return json(res, 200, { status: anyStale ? 'degraded' : 'ok', version: '0.1.0', tenantCount: config.tenants.length, staleThresholdSeconds, tenants, emailConfigured: mailerConfigured(config), collectedAt: new Date().toISOString() });
     }
 
     if (url.pathname === '/reports') {
