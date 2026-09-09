@@ -461,6 +461,28 @@ report is generated from the tenant's last collected snapshot
 (`collector/data/<tenantId>.json`), the same data `/tenants/:id/snapshot`
 already serves — nothing here makes an extra Graph call.
 
+## Shared Risk Register
+
+The SPA's Risk Register (acknowledged Need Attention / Toxic Combination
+findings, each with a required note) is shared across every admin when a
+collector is connected and tracking the tenant they're viewing — stored as
+one row per `(tenant, finding)` in the collector's own database, not
+per-browser `localStorage`. Two admins acknowledging the same finding see
+each other's acknowledgment and note; unacknowledging removes it for
+everyone, not just the browser that did it.
+
+No configuration needed — this activates automatically the moment
+`VITE_COLLECTOR_URL`/`VITE_COLLECTOR_TOKEN` point the dashboard at a
+collector that's tracking the signed-in tenant. Without a collector (or for
+a tenant the collector isn't tracking), it falls back to browser-local
+`localStorage` exactly as before — acknowledging still works, it just isn't
+shared until a collector is connected.
+
+Endpoints: `GET /tenants/:id/risk-register` lists entries; `PUT
+/tenants/:id/risk-register/:key` (body: `{note, title, category}`) creates
+or updates one (`note` is required — an acknowledgment always needs a
+reason); `DELETE /tenants/:id/risk-register/:key` removes one.
+
 ## What this version does and doesn't do
 
 Implemented: users/applications/groups/devices/sign-in counts, risky users,
@@ -468,10 +490,8 @@ privileged-role assignments, Conditional Access policy count, stale-user
 count, MFA registration gap, license SKU inventory + stale-licensed-account
 count, application credential (secret/certificate) expiry (including expired
 counts split by secret vs. certificate), append-only historical trend/delta,
-new-application actor tracking, and on-demand/scheduled email reports (see
-above, requires the `smtp` block).
+new-application actor tracking, on-demand/scheduled email reports (requires
+the `smtp` block), and a shared multi-admin Risk Register (see above).
 
-Not yet implemented: sign-in trend/recent-activity history (only the point
-counts are stored, not the full sign-in log), and a shared/multi-user Risk
-Register (the SPA's exception register is still browser-local `localStorage`
-— extending it into this database is a natural next step, not yet done).
+Not yet implemented: sign-in trend/recent-activity history — only the point
+counts are stored, not the full sign-in log.

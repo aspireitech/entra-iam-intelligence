@@ -53,8 +53,46 @@ export function getDb() {
       last_sent_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_report_schedules_tenant ON report_schedules(tenant_id);
+
+    CREATE TABLE IF NOT EXISTS risk_register (
+      tenant_id TEXT NOT NULL,
+      entry_key TEXT NOT NULL,
+      title TEXT,
+      category TEXT,
+      note TEXT NOT NULL,
+      acknowledged_by TEXT,
+      acknowledged_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, entry_key)
+    );
   `);
   return db;
+}
+
+// --- Risk Register (Need Attention / Toxic Combination acknowledgments) --
+// Shared across every admin pointed at this collector - unlike the SPA's
+// standalone fallback (browser localStorage), this is one row per
+// (tenant, finding) that everyone reads and writes the same copy of.
+export function listRiskRegister(tenantId) {
+  return getDb().prepare(`
+    SELECT entry_key AS key, title, category, note, acknowledged_by AS acknowledgedBy, acknowledged_at AS at
+    FROM risk_register WHERE tenant_id = ? ORDER BY acknowledged_at DESC
+  `).all(tenantId);
+}
+export function upsertRiskRegisterEntry(tenantId, key, { title, category, note, acknowledgedBy, at }) {
+  getDb().prepare(`
+    INSERT INTO risk_register (tenant_id, entry_key, title, category, note, acknowledged_by, acknowledged_at)
+    VALUES (@tenant_id, @entry_key, @title, @category, @note, @acknowledged_by, @acknowledged_at)
+    ON CONFLICT(tenant_id, entry_key) DO UPDATE SET
+      title = excluded.title, category = excluded.category, note = excluded.note,
+      acknowledged_by = excluded.acknowledged_by, acknowledged_at = excluded.acknowledged_at
+  `).run({
+    tenant_id: tenantId, entry_key: key,
+    title: title ?? null, category: category ?? null, note,
+    acknowledged_by: acknowledgedBy ?? null, acknowledged_at: at || new Date().toISOString(),
+  });
+}
+export function deleteRiskRegisterEntry(tenantId, key) {
+  getDb().prepare(`DELETE FROM risk_register WHERE tenant_id = ? AND entry_key = ?`).run(tenantId, key);
 }
 
 // --- Scheduled email reports ---------------------------------------------

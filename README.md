@@ -34,14 +34,16 @@ Implemented:
 - Devices page: compliance donut with an explicit "Unknown / not reported" bucket for devices with no compliance state at all, rather than folding them into non-compliant
 - Reports page: on-demand CSV/print export across every major data set, plus on-demand and scheduled (daily/weekly) email reports when the collector is running with SMTP configured (see `collector/README.md` "Email reports")
 - Demo mode: a full walkthrough of the dashboard with no Microsoft sign-in, for when Entra is unreachable or before an app registration exists (see above)
-- Auto-refresh every `VITE_REFRESH_INTERVAL_SECONDS` (default 60s) while the tab is open and signed in
+- Local login: a second, opt-in fallback (`VITE_LOCAL_LOGIN_PASSWORD_HASH`) showing the last real snapshot this browser saved — real (if stale) data, not fabricated, for when Microsoft sign-in itself isn't working. See `RUNBOOK.md` §8.
+- Stale-while-revalidate snapshot cache: every successful sync saves a capped snapshot to this browser's `localStorage`; the next load hydrates instantly from it instead of showing a blank "Collecting live data..." screen, then replaces it with fresh data once the live sync resolves
+- Auto-refresh every `VITE_REFRESH_INTERVAL_SECONDS` (floor and default 30s) while the tab is open and signed in — see `RUNBOOK.md` §9 for how this trades off against Microsoft Graph throttling and when to run the collector instead; Graph `429`/`503` responses are now retried with backoff honoring `Retry-After` rather than retried blindly
 - Data Sources control plane: Microsoft Entra (live), a read-only Active Directory agent (`agent/IAM-AD-Agent.ps1`), and an optional certificate-authenticated multi-tenant collector (`collector/`, see its README) powering a combined cross-tenant view; SailPoint and Saviynt are listed but not yet built, and are never shown as connected
 - Toxic Combinations: privileged users who also lack MFA, are flagged risky, or are stale 90+ days, cross-referenced by identity rather than shown as unrelated counts
-- Risk Register: acknowledged Need Attention / Toxic Combination findings with a required exception note (currently browser-local, not yet shared across users)
+- Risk Register: acknowledged Need Attention / Toxic Combination findings with a required exception note — shared across every admin when the collector is connected (stored in its database, not the browser); falls back to browser-local storage standalone
 - Historical trend, delta, and "who registered this application" (person vs. automation) via the collector's SQLite store and directory-audit tracking — requires the collector running and tracking the tenant you're viewing
 - Sign-out clears the MSAL session and local tenant/session state
 
-Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product handoff for the full roadmap): a normalized cross-source entity model, per-metric "how this was calculated" drill-down for every panel, a separate tenant Disconnect action, a shared/multi-user Risk Register, sign-in-log history (only point counts are stored), and the SailPoint/Saviynt connectors themselves (permission model documented in `docs/PERMISSIONS.md`, not yet built).
+Not yet implemented (see `docs/PHASE-1-2-3-TEST-MATRIX.md` and the product handoff for the full roadmap): a normalized cross-source entity model, per-metric "how this was calculated" drill-down for every panel, a separate tenant Disconnect action, sign-in-log history (only point counts are stored), and the SailPoint/Saviynt connectors themselves (permission model documented in `docs/PERMISSIONS.md`, not yet built).
 
 **No Microsoft client secret or certificate is ever used in the browser.**
 

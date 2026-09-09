@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { loadAllSnapshots, loadSnapshot, combineSnapshots } from './store.js';
 import { certExpiry } from './msal.js';
-import { getHistory, getDelta, getAppEvents, listReportSchedules, createReportSchedule, deleteReportSchedule } from './db.js';
+import { getHistory, getDelta, getAppEvents, listReportSchedules, createReportSchedule, deleteReportSchedule, listRiskRegister, upsertRiskRegisterEntry, deleteRiskRegisterEntry } from './db.js';
 import { REPORT_DEFINITIONS, generateReportCsv } from './reports.js';
 import { sendReportEmail, mailerConfigured } from './mailer.js';
 
@@ -70,7 +70,7 @@ async function handleRequest(req, res, config) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'X-IAM-Collector-Token,Content-Type',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
       });
       return res.end();
     }
@@ -183,5 +183,22 @@ async function handleRequest(req, res, config) {
       return json(res, 200, { deleted: true });
     }
 
-    json(res, 404, { error: 'Not found', endpoints: ['/health', '/tenants', '/tenants/:id/snapshot', '/tenants/:id/history', '/tenants/:id/delta', '/tenants/:id/app-events', '/combined', '/reports', '/tenants/:id/reports/:reportId/csv', '/tenants/:id/reports/:reportId/send', '/tenants/:id/report-schedules'] });
+    const riskRegisterMatch = url.pathname.match(/^\/tenants\/([^/]+)\/risk-register$/);
+    if (riskRegisterMatch && req.method === 'GET') {
+      return json(res, 200, { entries: listRiskRegister(riskRegisterMatch[1]) });
+    }
+
+    const riskRegisterEntryMatch = url.pathname.match(/^\/tenants\/([^/]+)\/risk-register\/([^/]+)$/);
+    if (riskRegisterEntryMatch && req.method === 'PUT') {
+      const body = await readJsonBody(req);
+      if (!body.note) return json(res, 400, { error: 'A note is required to acknowledge a risk register entry.' });
+      upsertRiskRegisterEntry(riskRegisterEntryMatch[1], decodeURIComponent(riskRegisterEntryMatch[2]), body);
+      return json(res, 200, { saved: true });
+    }
+    if (riskRegisterEntryMatch && req.method === 'DELETE') {
+      deleteRiskRegisterEntry(riskRegisterEntryMatch[1], decodeURIComponent(riskRegisterEntryMatch[2]));
+      return json(res, 200, { deleted: true });
+    }
+
+    json(res, 404, { error: 'Not found', endpoints: ['/health', '/tenants', '/tenants/:id/snapshot', '/tenants/:id/history', '/tenants/:id/delta', '/tenants/:id/app-events', '/combined', '/reports', '/tenants/:id/reports/:reportId/csv', '/tenants/:id/reports/:reportId/send', '/tenants/:id/report-schedules', '/tenants/:id/risk-register'] });
 }

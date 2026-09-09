@@ -19,7 +19,11 @@ Two paths through this document:
   trend, unattended collection, email reports): steps 1–6.
 
 Step 7 (Demo mode) works with **no setup at all** — jump straight there if
-you just want to see the product before doing any of this.
+you just want to see the product before doing any of this. Step 8 (Local
+login) is a second, separate fallback worth setting up once you have a
+working dashboard, in case Entra sign-in itself ever stops working during a
+demo or outage — it shows real (if slightly stale) tenant data instead of
+Demo mode's fabricated sample data.
 
 ---
 
@@ -576,7 +580,137 @@ mode you have to explicitly enter and exit.
 
 ---
 
-## 8. Troubleshooting quick reference
+## 8. Local login (real saved data, for when Entra sign-in itself fails)
+
+Demo mode (step 7) always shows fabricated sample data - useful for a
+walkthrough, but not what you want during an actual outage when you need to
+show *your* real numbers. Local login is the other fallback: it shows the
+**last real snapshot this browser successfully saved**, real data, just
+possibly a few minutes/hours old, clearly labeled as such.
+
+It's opt-in and off by default - it only appears once you set a password
+for it.
+
+### 8.1 Choose a local login password and hash it
+
+Nothing is sent anywhere to verify this password - it's checked entirely in
+the browser (SHA-256 compare against a hash baked into the build). Pick a
+password and hash it:
+
+```bash
+node -e "console.log(require('crypto').createHash('sha256').update('YOUR-CHOSEN-PASSWORD').digest('hex'))"
+```
+
+Add the printed hash to `.env.local` (or `.env.production` for a real
+deployment):
+
+```env
+VITE_LOCAL_LOGIN_PASSWORD_HASH=<the printed hash>
+```
+
+Rebuild/restart after editing, same as any other `.env` change (step 4).
+
+**Be clear-eyed about what this is and isn't:** it's a convenience against a
+blank screen during an outage or demo, not a real authentication boundary.
+Anyone with browser devtools access to the deployed site can read the hash
+out of the built JS and brute-force it offline, or read the cached snapshot
+straight out of `localStorage` without the password at all. Don't set this
+up on a shared/public machine, and don't treat it as equivalent to Entra's
+own access control.
+
+**Validate:** Reload the dashboard's sign-in screen.
+
+**Expected result:** A **"Local login (view last saved real data)"** button
+now appears below "Sign in with Microsoft" (and on the connection-error
+screen). It didn't appear before you set the env var - that's the opt-in
+behavior working correctly, not a bug.
+
+### 8.2 How the saved data gets there in the first place
+
+Nothing further to configure - every time the dashboard completes a real
+sync (live Graph or collector-backed), it automatically saves a capped copy
+of that snapshot to this browser's `localStorage`, keyed by tenant ID. This
+happens silently in the background; there's no separate "save a snapshot"
+action to remember.
+
+**Validate:** Sign in normally at least once, let the dashboard fully load,
+then in the browser devtools console:
+
+```js
+Object.keys(localStorage).filter(k => k.startsWith('iam_local_snapshot_'))
+```
+
+**Expected result:** At least one key is present. That's what local login
+will show if Entra sign-in stops working later.
+
+### 8.3 Use it
+
+On the sign-in screen, click **Local login**, enter the password from 8.1.
+
+**Expected result:** The dashboard loads immediately (no network call at
+all) showing the most recent saved snapshot, with a persistent banner
+reading "Showing last saved snapshot from &lt;date/time&gt;..." - distinct
+wording from the Demo mode banner, since this is real data, not fabricated.
+Auto-refresh is off in this mode (there's nothing live behind it); click
+**Exit local login** to return to normal sign-in once Entra is working
+again.
+
+### 8.4 Why the dashboard also stops looking blank on a normal login
+
+This same saved-snapshot mechanism fixes a related, more common problem:
+previously, signing in on a slow network or a large tenant could leave the
+dashboard showing "Collecting live data..." for many seconds before
+anything appeared. Now, `data` hydrates from the same local snapshot cache
+immediately on load (if this browser has one from a previous session), so
+Groups/Devices/Applications/Reports/etc. all render real - if a few
+minutes/hours stale - content right away, while a live refresh runs
+silently in the background and replaces it the moment it resolves. Look for
+"Showing cached snapshot from &lt;time&gt; - refreshing..." in the live-row
+status text during that brief window; it disappears once live data lands.
+
+---
+
+## 9. How fresh is the data, and does polling it risk Graph throttling?
+
+Three different refresh cadences are in play, and they answer different
+questions - worth being precise about which one governs what you're
+looking at:
+
+| Path | How often it hits Microsoft Graph | What that means |
+|---|---|---|
+| Direct Graph (no collector) | Every `VITE_REFRESH_INTERVAL_SECONDS` (floor 30s, default 30s) - **per open browser tab** | Each refresh re-runs ~20-40 Graph queries. One admin with the dashboard open: fine. Ten admins each with a tab open on the same tenant: that's ten independent 30-second polling loops all hitting Graph - this is the case that can add up to real throttling risk under load, because nothing coordinates between browser tabs. |
+| Collector-backed (collector tracking this tenant) | Every `intervalSeconds` in `tenants.json` (floor 300s/5 min, default 900s/15 min) - **regardless of how many browsers are viewing it** | Every dashboard tab reads the collector's already-collected local snapshot (one HTTP call to `127.0.0.1:8766`, no Graph traffic) every `VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS` (default 8s). Graph itself is only queried once per `intervalSeconds`, centrally, no matter how many people are looking. **This is the path that scales safely with more viewers - use it if more than one or two people will have the dashboard open regularly.** |
+| Local login / Demo mode | Never | No live source behind either; no polling at all. |
+
+**So: "is my data 5 minutes old or 10 minutes old?"** Without a collector,
+it's at most `VITE_REFRESH_INTERVAL_SECONDS` old (30s by default) - fresher,
+but each viewer pays the full Graph query cost independently. With a
+collector, it's at most `intervalSeconds` old (15 minutes by default,
+configurable down to 5) - a bit staler, but Graph is only ever queried once
+per interval no matter how many admins are watching.
+
+**Will this cause a production outage from throttling?** Two things make
+that unlikely even on the direct-Graph path, but it's not risk-free at
+high concurrency:
+
+- Every Graph call now honors Microsoft's own `Retry-After` header on a
+  `429`/`503` and backs off before retrying (bounded to 2 retries, ~30s max
+  wait) instead of hammering again immediately - this was a real gap before
+  and is now fixed in `src/entraAuth.js`'s `graphGet`.
+- Graph's throttling is scoped per app registration per tenant, and this
+  app's queries are read-only `$top`-bounded list calls, not the kind that
+  trip Graph's stricter write-throttling tiers.
+
+That said, throttling risk still scales with **concurrent independent
+pollers**, not with data volume - five people each running their own
+30-second direct-Graph loop against the same tenant is the scenario to
+avoid. **If more than one or two people will have this dashboard open on
+the same tenant regularly, run the collector (step 6)** - it turns N
+viewers' Graph load into 1, however many people are watching.
+
+---
+
+## 10. Troubleshooting quick reference
 
 Issues actually hit while setting this up, and their fix:
 
@@ -593,12 +727,17 @@ Issues actually hit while setting this up, and their fix:
 | Devices page: "0 compliant, 1 non-compliant" out of many more devices, rest unaccounted for | Devices with no compliance state reported at all (`isCompliant` is `null` — not enrolled in Intune/an MDM) weren't counted anywhere | Fixed — Devices page now has an explicit "Unknown / not reported" KPI and donut segment so every device is accounted for |
 | Reports page is blank | It was an unbuilt placeholder in earlier versions | Fixed — see the on-demand and scheduled-email reports in step 6.6/`collector/README.md` |
 | Email report never arrives | No `smtp` block in `tenants.json`, or `emailConfigured: false` in `/health` | Add the `smtp` block (step 6.6), restart the collector, re-check `/health` |
-| `npm run build` warns about a chunk over 500 kB | Expected — the whole SPA ships as one JS bundle by design (no server-side rendering, no router) | Not an error; safe to ignore for this project's size |
+| Dashboard was blank/"Collecting live data..." for many seconds on a slow network or different device | No previously-saved local snapshot on that browser to hydrate from while the live fetch ran | Fixed — every successful sync now saves a snapshot to `localStorage`; the next load on that browser hydrates from it instantly instead of showing blank (step 8.4). First-ever login on a brand-new browser/device still has nothing to hydrate from, so it's still not instant the very first time. |
+| "Local login" button doesn't appear on the sign-in screen | `VITE_LOCAL_LOGIN_PASSWORD_HASH` isn't set | Set it (step 8.1) and rebuild/restart |
+| Local login says "No saved snapshot yet" | This browser has never completed a real sign-in and sync | Sign in normally at least once first (step 8.2) |
+| Two admins acknowledging the same Risk Register finding each see their own copy | No collector connected — the register defaults to browser-local `localStorage`, which isn't shared | Connect the collector (step 6) — Risk Register automatically becomes shared across every admin pointed at it, no separate migration step |
+| Graph calls start failing with `429`/`503` during a sync | Microsoft Graph throttling — usually several people each independently polling the same tenant via direct Graph (see step 9) | Already retried with backoff automatically (bounded, honors `Retry-After`); if it persists, run the collector so N viewers become 1 poller instead of N |
+| `npm run build` warns about a chunk over 500 kB | Fixed — vendor libraries (React, MSAL) now build into their own chunk (`vite.config.js` `manualChunks`), separate from app code | If you still see this warning, check `vite.config.js` wasn't reverted |
 | Node prints `ExperimentalWarning: SQLite is an experimental feature...` on collector startup | Node's own warning for its built-in `node:sqlite` module | Expected and harmless — not a bug, nothing to fix |
 
 ---
 
-## 9. Command cheat sheet
+## 11. Command cheat sheet
 
 ```bash
 # Dashboard — local dev

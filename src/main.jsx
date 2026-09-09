@@ -2,10 +2,11 @@ import React,{useEffect,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './styles.css';
 import {connectSecurityScopes,connectLicenseScopes,connectGovernanceScopes,getLicenseSnapshot,getAppConsentSnapshot,getSignInTrend,signOut} from './entraAuth.js';
-import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents,listReportSchedules,createReportSchedule,deleteReportSchedule,sendReportNow} from './dataSources.js';
-import {syncTenantData,getCachedOverview} from './liveTenantData.js';
+import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents,listReportSchedules,createReportSchedule,deleteReportSchedule,sendReportNow,listRiskRegister,upsertRiskRegisterEntry,deleteRiskRegisterEntry} from './dataSources.js';
+import {syncTenantData,getCachedOverview,getLocalSnapshot} from './liveTenantData.js';
 import {isDemoMode,exitDemoMode} from './demoMode.js';
 import {buildDemoSnapshot} from './demoData.js';
+import {isLocalLoginMode,exitLocalLoginMode} from './localLogin.js';
 
 const NAV_GROUPS=[
   {section:null,items:[['Overview','⌂']]},
@@ -45,6 +46,36 @@ const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
 const EXCEPTIONS_KEY='iam_attention_exceptions';
 function loadExceptions(){try{return JSON.parse(localStorage.getItem(EXCEPTIONS_KEY)||'{}');}catch{return{};}}
 function saveExceptions(map){try{localStorage.setItem(EXCEPTIONS_KEY,JSON.stringify(map));}catch{/* ignore quota/private-mode errors */}}
+// Risk Register exceptions (Need Attention + Toxic Combination acknowledgments):
+// shared across every admin via the collector's database when one is connected
+// and tracking this tenant, so two admins looking at the same tenant see the same
+// acknowledgments - not each their own copy. Falls back to this browser's
+// localStorage when no collector is available, so acknowledging still works
+// standalone; it just isn't shared until a collector is connected.
+function useRiskRegister(tenantId,collectorStatus){
+  const collectorReady=Boolean(collectorStatus?.connected&&tenantId);
+  const [exceptions,setExceptions]=useState(()=>collectorReady?{}:loadExceptions());
+  useEffect(()=>{
+    if(!collectorReady){setExceptions(loadExceptions());return;}
+    let cancelled=false;
+    listRiskRegister(tenantId).then(r=>{
+      if(cancelled)return;
+      if(r.ok){const map={};for(const row of r.data.entries||[])map[row.key]={note:row.note,at:row.at,title:row.title,category:row.category};setExceptions(map);}
+      else setExceptions(loadExceptions()); // collector unreachable right now - fall back rather than show nothing
+    });
+    return()=>{cancelled=true;};
+  },[collectorReady,tenantId]);
+  const acknowledge=(key,entry)=>{
+    const record={...entry,at:entry.at||new Date().toISOString()};
+    setExceptions(prev=>{const next={...prev,[key]:record};if(!collectorReady)saveExceptions(next);return next;});
+    if(collectorReady)upsertRiskRegisterEntry(tenantId,key,record);
+  };
+  const unacknowledge=key=>{
+    setExceptions(prev=>{const next={...prev};delete next[key];if(!collectorReady)saveExceptions(next);return next;});
+    if(collectorReady)deleteRiskRegisterEntry(tenantId,key);
+  };
+  return {exceptions,acknowledge,unacknowledge,shared:collectorReady};
+}
 // Graph has no "break-glass account" flag - only an admin knows which accounts are
 // designated emergency access. Stored locally (like exceptions above) since there's no
 // backend yet to share this across users.
@@ -148,10 +179,10 @@ function ApplicationsDetailPage({data}){
   </div>;
 }
 
-function ToxicCombinationsPage({data}){
-  const [exceptions,setExceptions]=useState(loadExceptions());
+function ToxicCombinationsPage({data,collectorStatus}){
+  const {exceptions,acknowledge:ackEntry}=useRiskRegister(data.organization?.id,collectorStatus);
   const [q,setQ]=useFilter();
-  const acknowledge=(id,name)=>{const note=window.prompt(`Note for accepting risk on ${name} (why is this acceptable)?`);if(note==null)return;const key=`toxic-${id}`;const next={...exceptions,[key]:{note,at:new Date().toISOString(),title:`Toxic combination: ${name}`,category:'Toxic Combination'}};setExceptions(next);saveExceptions(next);};
+  const acknowledge=(id,name)=>{const note=window.prompt(`Note for accepting risk on ${name} (why is this acceptable)?`);if(note==null)return;ackEntry(`toxic-${id}`,{note,title:`Toxic combination: ${name}`,category:'Toxic Combination'});};
   if(!data.toxicCombinationsAvailable)return <div className="source-page"><div className="empty-state large">Requires privileged-role data (RoleManagement.Read.Directory) plus at least one of MFA registration, ID Protection risk, or sign-in activity data.</div></div>;
   const all=data.toxicCombinations||[];
   const active=all.filter(c=>!exceptions[`toxic-${c.id}`]);
@@ -164,11 +195,10 @@ function ToxicCombinationsPage({data}){
   </div>;
 }
 
-function RiskRegisterPage(){
-  const [exceptions,setExceptions]=useState(loadExceptions());
-  const unacknowledge=key=>{const next={...exceptions};delete next[key];setExceptions(next);saveExceptions(next);};
+function RiskRegisterPage({data,collectorStatus}){
+  const {exceptions,unacknowledge,shared}=useRiskRegister(data?.organization?.id,collectorStatus);
   const entries=Object.entries(exceptions).sort((a,b)=>new Date(b[1].at)-new Date(a[1].at));
-  return <div className="source-page"><section className="grid top-grid single"><Card title={`Risk Register (${entries.length} exception${entries.length===1?'':'s'})`}>{!entries.length?<div className="empty-state large">No exceptions acknowledged yet. Acknowledge a Need Attention or Toxic Combination finding to add it here with an audit note.</div>:<div className="license-table"><table><thead><tr><th>Finding</th><th>Category</th><th>Note</th><th>Acknowledged</th><th></th></tr></thead><tbody>{entries.map(([key,ex])=><tr key={key}><td>{ex.title||key}</td><td>{ex.category||'—'}</td><td>{ex.note}</td><td>{new Date(ex.at).toLocaleString()}</td><td><button className="ack-chip" onClick={()=>unacknowledge(key)}>Undo</button></td></tr>)}</tbody></table></div>}<div className="disclaimer">Stored in this browser's local storage only - not shared across users or synced yet. Treat this as a personal working register, not a compliance record of record, until backend storage is added to the collector.</div></Card></section></div>;
+  return <div className="source-page"><section className="grid top-grid single"><Card title={`Risk Register (${entries.length} exception${entries.length===1?'':'s'})`}>{!entries.length?<div className="empty-state large">No exceptions acknowledged yet. Acknowledge a Need Attention or Toxic Combination finding to add it here with an audit note.</div>:<div className="license-table"><table><thead><tr><th>Finding</th><th>Category</th><th>Note</th><th>Acknowledged</th><th></th></tr></thead><tbody>{entries.map(([key,ex])=><tr key={key}><td>{ex.title||key}</td><td>{ex.category||'—'}</td><td>{ex.note}</td><td>{new Date(ex.at).toLocaleString()}</td><td><button className="ack-chip" onClick={()=>unacknowledge(key)}>Undo</button></td></tr>)}</tbody></table></div>}<div className="disclaimer">{shared?'Shared across every admin pointed at this same collector - stored in the collector\'s database, not this browser, so everyone sees the same acknowledgments.':'Stored in this browser\'s local storage only - not shared across users. Connect the collector (see Data Sources) to make this register shared across every admin instead of per-browser.'}</div></Card></section></div>;
 }
 
 function DevicesDetailPage({data}){
@@ -343,10 +373,9 @@ function CachedOverviewNotice({cache}){
   </>;
 }
 
-function EntraDashboard({data,onSecurity,onNavigate}){
-  const [exceptions,setExceptions]=useState(loadExceptions());
-  const acknowledge=key=>{const note=window.prompt('Note for this exception (why is it acceptable to exclude from Need Attention)?');if(note==null)return;const item=attention.find(a=>a.key===key);const next={...exceptions,[key]:{note,at:new Date().toISOString(),title:item?.title||key,category:'Need Attention'}};setExceptions(next);saveExceptions(next);};
-  const unacknowledge=key=>{const next={...exceptions};delete next[key];setExceptions(next);saveExceptions(next);};
+function EntraDashboard({data,onSecurity,onNavigate,collectorStatus}){
+  const {exceptions,acknowledge:ackEntry,unacknowledge}=useRiskRegister(data.organization?.id,collectorStatus);
+  const acknowledge=key=>{const note=window.prompt('Note for this exception (why is it acceptable to exclude from Need Attention)?');if(note==null)return;const item=attention.find(a=>a.key===key);ackEntry(key,{note,title:item?.title||key,category:'Need Attention'});};
   const attention=[
     {key:'toxic',level:'critical',title:'Toxic Combinations (Privileged + Risk Signal)',detail:'Privileged accounts that also lack MFA, are flagged risky by ID Protection, or are stale 90+ days',value:data.toxicCombinationsAvailable?data.toxicCombinationsCount:null,nav:'Toxic Combinations'},
     {key:'mfa',level:'warning',title:'Users Without MFA',detail:'No registered MFA method in the authentication registration report',value:data.mfa?.missing,nav:'Users'},
@@ -510,7 +539,24 @@ function ReportsPage({data,collectorStatus}){
 
 function App(){
   const demoMode=isDemoMode();
-  const [active,setActive]=useState('Overview');const [sourceId,setSourceId]=useState(getActiveSource());const [data,setData]=useState(window.__IAM_SNAPSHOT__||null);const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);
+  const localLoginMode=isLocalLoginMode();
+  // Demo and local login are both "there is no live source behind this" modes -
+  // they share every guard that would otherwise poll or refresh against a tenant
+  // that isn't actually there.
+  const offlineMode=demoMode||localLoginMode;
+  const [active,setActive]=useState('Overview');const [sourceId,setSourceId]=useState(getActiveSource());
+  const [data,setData]=useState(()=>{
+    if(window.__IAM_SNAPSHOT__)return window.__IAM_SNAPSHOT__;
+    // Stale-while-revalidate: hydrate from the last real snapshot this device saved
+    // (if any) instead of starting blank. loadDashboard() in authBoot.js already
+    // kicks off a real syncTenantData() in the background right after this renders,
+    // which replaces this stale data with fresh data the moment it resolves - this
+    // is purely about not showing an empty "Collecting live data..." screen for
+    // several/tens of seconds on a slow network or a large tenant.
+    const cached=getLocalSnapshot(sessionStorage.getItem('iam_tenant_id'));
+    return cached?{...cached.snapshot,dataSource:'stale-cache',cachedAt:cached.savedAt}:null;
+  });
+  const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);
   useEffect(()=>{const h=e=>{setData(e.detail);setLoading(false)};document.addEventListener('iam-live-data',h);return()=>document.removeEventListener('iam-live-data',h)},[]);
   useEffect(()=>{checkAdAgent().then(setAdStatus)},[]);
   useEffect(()=>{checkCollector().then(setCollectorStatus)},[]);
@@ -524,10 +570,10 @@ function App(){
   const dataSourceRef=useRef(data?.dataSource||null);
   useEffect(()=>{dataSourceRef.current=data?.dataSource||null;},[data]);
   useEffect(()=>{
-    // Demo mode never polls - there's no live tenant behind it, and syncTenantData()
-    // would just fail against MSAL repeatedly (or worse, silently try real Graph
-    // calls) every refresh interval.
-    if(sourceId!=='entra'||demoMode)return;
+    // Neither offline mode (demo or local login) polls - there's no live tenant
+    // behind either, and syncTenantData() would just fail against MSAL repeatedly
+    // (or worse, silently try real Graph calls) every refresh interval.
+    if(sourceId!=='entra'||offlineMode)return;
     let cancelled=false,timer=null;
     // Recursive setTimeout, not setInterval: the interval itself changes once the
     // collector confirms it's tracking this tenant (COLLECTOR_REFRESH_SECONDS,
@@ -546,7 +592,7 @@ function App(){
     scheduleNext();
     return()=>{cancelled=true;if(timer)clearTimeout(timer);};
   },[sourceId]);
-  const refresh=async()=>{if(demoMode){setData(buildDemoSnapshot());setToast('Demo data regenerated');setTimeout(()=>setToast(''),3000);return;}setLoading(true);try{if(sourceId==='entra'){const snap=await syncTenantData();setData(snap);setToast(snap.dataSource==='collector'?'Refreshed from collector':'Entra data refreshed (live Graph)')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
+  const refresh=async()=>{if(demoMode){setData(buildDemoSnapshot());setToast('Demo data regenerated');setTimeout(()=>setToast(''),3000);return;}if(localLoginMode){setToast('Local login shows a fixed saved snapshot - exit local login to sign in and refresh live.');setTimeout(()=>setToast(''),4000);return;}setLoading(true);try{if(sourceId==='entra'){const snap=await syncTenantData();setData(snap);setToast(snap.dataSource==='collector'?'Refreshed from collector':'Entra data refreshed (live Graph)')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
   const chooseSource=id=>{setActiveSource(id);setSourceId(id);setActive('Overview');};
   const grantSecurity=async()=>{try{setToast('Requesting security permissions…');await connectSecurityScopes();setToast('Consent completed; refreshing security data…');await refresh()}catch(e){setToast(e.message||'Security consent failed')}setTimeout(()=>setToast(''),4000)};
   const grantLicense=async()=>{setLicenseLoading(true);try{setToast('Requesting license permissions…');await connectLicenseScopes();setToast('Consent completed; loading license data…');const d=await getLicenseSnapshot();setLicenseData(d);}catch(e){setToast(e.message||'License consent failed')}finally{setLicenseLoading(false);setTimeout(()=>setToast(''),4000)}};
@@ -567,13 +613,13 @@ function App(){
     else if(active==='Legacy Authentication')entraContent=<LegacyAuthenticationPage data={data}/>;
     else if(active==='Sign-ins')entraContent=<SignInsDetailPage data={data} trend={signInTrend} trendDays={signInTrendDays} trendLoading={signInTrendLoading} onRangeChange={loadSignInTrend}/>;
     else if(active==='Conditional Access')entraContent=<ConditionalAccessDetailPage data={data} onSecurity={grantSecurity}/>;
-    else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data}/>;
-    else if(active==='Risk Register')entraContent=<RiskRegisterPage/>;
+    else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data} collectorStatus={collectorStatus}/>;
+    else if(active==='Risk Register')entraContent=<RiskRegisterPage data={data} collectorStatus={collectorStatus}/>;
     else if(active==='Reports')entraContent=<ReportsPage data={data} collectorStatus={collectorStatus}/>;
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
-    else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav}/>;
+    else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav} collectorStatus={collectorStatus}/>;
   }
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={demoMode?exitDemoMode:signOut}><span>⇥</span>{demoMode?'Exit demo':'Sign out'}</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{demoMode?'Demo data • no auto-refresh':data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{demoMode&&<div className="permission-banner"><div><strong>Showing sample demo data.</strong><span>Not connected to Microsoft Entra - every number here is fabricated for preview/offline use, e.g. when the tenant or Entra itself is unreachable. Exit demo to sign in with a real account.</span></div><button className="primary" onClick={exitDemoMode}>Exit demo</button></div>}{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={demoMode?exitDemoMode:localLoginMode?exitLocalLoginMode:signOut}><span>⇥</span>{demoMode?'Exit demo':localLoginMode?'Exit local login':'Sign out'}</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{demoMode?'Demo data • no auto-refresh':localLoginMode?`Local login • saved ${data?.cachedAt?new Date(data.cachedAt).toLocaleString():'previously'} • no auto-refresh`:data?.dataSource==='stale-cache'?`Showing cached snapshot from ${data?.cachedAt?new Date(data.cachedAt).toLocaleTimeString():'earlier'} • refreshing…`:data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{demoMode&&<div className="permission-banner"><div><strong>Showing sample demo data.</strong><span>Not connected to Microsoft Entra - every number here is fabricated for preview/offline use, e.g. when the tenant or Entra itself is unreachable. Exit demo to sign in with a real account.</span></div><button className="primary" onClick={exitDemoMode}>Exit demo</button></div>}{localLoginMode&&<div className="permission-banner"><div><strong>Showing last saved snapshot{data?.cachedAt?` from ${new Date(data.cachedAt).toLocaleString()}`:''}.</strong><span>This is real data from the last successful sign-in on this device, not live - Microsoft sign-in is unavailable or not in use right now. Exit local login to try signing in again.</span></div><button className="primary" onClick={exitLocalLoginMode}>Exit local login</button></div>}{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);

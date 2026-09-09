@@ -92,3 +92,10 @@ export const listReportSchedules=(tenantId)=>collectorGet(`/tenants/${encodeURIC
 export const createReportSchedule=(tenantId,reportId,frequency,recipients)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/report-schedules`,{method:'POST',body:{reportId,frequency,recipients}});
 export const deleteReportSchedule=(tenantId,scheduleId)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/report-schedules/${scheduleId}`,{method:'DELETE'});
 export const sendReportNow=(tenantId,reportId,recipients)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/reports/${reportId}/send`,{method:'POST',body:{recipients}});
+
+// Risk Register (Need Attention / Toxic Combination acknowledgments) - shared
+// across every admin pointed at the same collector, instead of each browser
+// keeping its own separate localStorage copy.
+export const listRiskRegister=(tenantId)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/risk-register`);
+export const upsertRiskRegisterEntry=(tenantId,key,entry)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/risk-register/${encodeURIComponent(key)}`,{method:'PUT',body:entry});
+export const deleteRiskRegisterEntry=(tenantId,key)=>collectorRequest(`/tenants/${encodeURIComponent(tenantId)}/risk-register/${encodeURIComponent(key)}`,{method:'DELETE'});

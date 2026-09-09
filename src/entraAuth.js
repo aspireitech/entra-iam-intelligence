@@ -22,7 +22,32 @@ export async function connectSecurityScopes(){const result=await acquireToken(SE
 export async function connectLicenseScopes(){const result=await acquireToken(LICENSE_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
 export async function connectGovernanceScopes(){const result=await acquireToken(GOVERNANCE_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
 export async function getGraphToken(scopes=CORE_SCOPES,allowRedirect=true){const result=await acquireToken(scopes,allowRedirect);return result?.accessToken||null;}
-export async function graphGet(path,scopes=CORE_SCOPES,version='v1.0',allowRedirect=true){const token=await getGraphToken(scopes,allowRedirect);if(!token)throw new Error('Microsoft authentication redirect in progress.');const url=path.startsWith('https://')?path:`https://graph.microsoft.com/${version}${path}`;const response=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:'application/json',ConsistencyLevel:'eventual'}});if(!response.ok){const body=await response.text();const error=new Error(`Microsoft Graph ${response.status} on ${path}: ${body}`);error.status=response.status;throw error;}return response.json();}
+// Bounded retry on throttling only (429, and 503 which Graph also uses for transient
+// overload) - honoring the Retry-After header Graph sends is what keeps one busy
+// tenant/refresh cycle from digging itself deeper into throttling by hammering
+// again immediately. Every other error (permission denied, bad request, etc.)
+// still fails on the first try, same as before - retrying those would just waste
+// time before surfacing a failure that retrying can't fix.
+const GRAPH_MAX_RETRIES=2;
+export async function graphGet(path,scopes=CORE_SCOPES,version='v1.0',allowRedirect=true){
+  const token=await getGraphToken(scopes,allowRedirect);
+  if(!token)throw new Error('Microsoft authentication redirect in progress.');
+  const url=path.startsWith('https://')?path:`https://graph.microsoft.com/${version}${path}`;
+  for(let attempt=0;;attempt++){
+    const response=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:'application/json',ConsistencyLevel:'eventual'}});
+    if(response.ok)return response.json();
+    if((response.status===429||response.status===503)&&attempt<GRAPH_MAX_RETRIES){
+      const retryAfter=Number(response.headers.get('retry-after'));
+      const waitMs=Math.min(30000,Math.max(500,(Number.isFinite(retryAfter)?retryAfter:2**attempt)*1000));
+      await new Promise(resolve=>setTimeout(resolve,waitMs));
+      continue;
+    }
+    const body=await response.text();
+    const error=new Error(`Microsoft Graph ${response.status} on ${path}: ${body}`);
+    error.status=response.status;
+    throw error;
+  }
+}
 export async function graphGetOptional(path,scopes,version='v1.0'){try{return{ok:true,data:await graphGet(path,scopes,version,false)};}catch(error){return{ok:false,error};}}
 // Follows @odata.nextLink until exhausted, so a tenant with more records than one
 // page (999 for most list endpoints, 500 for roleManagement/riskyUsers) doesn't get
