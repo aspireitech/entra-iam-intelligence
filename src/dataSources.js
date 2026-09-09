@@ -67,6 +67,11 @@ async function collectorGet(path){
 // These read this tenant's own history from the collector - only meaningful if the
 // collector is configured to track this same tenant ID. If it isn't (or isn't
 // running), callers get an explicit reason, never a fabricated trend.
+// Full collector health payload (per-tenant staleness, cert expiry, email config) -
+// the same data the /health JSON endpoint returns, but fetched with the app's own
+// token so a page inside the dashboard can poll it and render it, instead of an
+// admin having to run a manual curl/Invoke-WebRequest with the token header.
+export const getCollectorHealth=()=>collectorGet('/health');
 export const getTenantDelta=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/delta?days=${days}`);
 export const getTenantHistory=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/history?days=${days}`);
 export const getAppEvents=(tenantId,days=30)=>collectorGet(`/tenants/${encodeURIComponent(tenantId)}/app-events?days=${days}`);
