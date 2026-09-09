@@ -215,6 +215,23 @@ whenever `.env.production` changes — there's no runtime config reload.
 
 ## 6. (Optional) Set up the collector
 
+**Automating steps 5-6 on a fresh Windows Server?** `scripts\deploy-windows-server.ps1`
+runs almost everything below in one logged, idempotent pass — Node.js, IIS,
+the collector, its Windows Service, the reverse proxy, and (optionally) a
+real trusted HTTPS certificate via win-acme (Let's Encrypt):
+
+```powershell
+.\scripts\deploy-windows-server.ps1 -HostName dashboard.yourcompany.com -WithCollector -EnableAcme -AcmeEmail admin@yourcompany.com
+```
+
+It writes a timestamped log to `C:\iam-intelligence\deploy-logs\` and prints
+a pass/fail summary at the end. It still can't do the parts that require a
+human in the Entra admin center (app registration, certificate upload,
+admin consent) — it stops and tells you exactly when you've reached that
+point, matching steps 3 and 6.3 below. Read the rest of this section once
+even if you use the script — it explains *why* each step exists, which the
+script's own comments summarize but don't replace.
+
 Skip this whole section if you only need the single-tenant live dashboard
 from step 4 — it already works standalone. Do this section if you want any
 of: a combined view across multiple tenants, faster refresh (~8s vs. 30s+),
