@@ -579,12 +579,20 @@ function App(){
     // collector confirms it's tracking this tenant (COLLECTOR_REFRESH_SECONDS,
     // typically 8s) vs. falling back to a direct Graph poll (REFRESH_SECONDS,
     // floor 30s) - this picks the current interval fresh on every tick instead of
-    // needing the effect to re-run whenever the data source changes.
-    const scheduleNext=()=>{if(cancelled)return;const seconds=dataSourceRef.current==='collector'?COLLECTOR_REFRESH_SECONDS:REFRESH_SECONDS;timer=setTimeout(tick,seconds*1000);};
+    // needing the effect to re-run whenever the data source changes. ±20% random
+    // jitter on top so many tabs opened around the same moment (a whole team
+    // checking the dashboard right after standup, say) don't stay permanently
+    // synchronized on the same tick schedule.
+    const jitter=seconds=>seconds*(0.8+Math.random()*0.4);
+    const scheduleNext=()=>{if(cancelled)return;const seconds=dataSourceRef.current==='collector'?COLLECTOR_REFRESH_SECONDS:REFRESH_SECONDS;timer=setTimeout(tick,jitter(seconds)*1000);};
     const tick=async()=>{
       if(!refreshingRef.current&&document.visibilityState==='visible'){
         refreshingRef.current=true;
-        try{const snap=await syncTenantData();setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
+        // allowDirectFallback:false - see liveTenantData.js: an automatic tick must
+        // never be the thing that turns a brief collector blip into every open tab
+        // hammering Graph directly at once. A failure here just means this tick
+        // keeps showing the last-known data and tries again next interval.
+        try{const snap=await syncTenantData({allowDirectFallback:false});setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
         finally{refreshingRef.current=false;}
       }
       scheduleNext();

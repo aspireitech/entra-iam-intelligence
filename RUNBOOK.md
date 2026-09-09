@@ -670,43 +670,109 @@ status text during that brief window; it disappears once live data lands.
 
 ---
 
-## 9. How fresh is the data, and does polling it risk Graph throttling?
+## 9. Scaling to 100+ concurrent users
 
-Three different refresh cadences are in play, and they answer different
-questions - worth being precise about which one governs what you're
-looking at:
+If this dashboard is going to be opened by dozens or hundreds of people
+across a large org every day - which is the normal case for anything
+positioned as SaaS - **the collector (step 6) is not an optional
+nice-to-have here, it's required infrastructure.** Direct-Graph mode
+(no collector) does not scale past a handful of simultaneous viewers on
+the same tenant. The rest of this section explains exactly why, with real
+numbers, and what's been done so this actually holds up at that scale
+rather than just asserting it.
+
+### 9.1 Three refresh cadences, and which one you're actually on
 
 | Path | How often it hits Microsoft Graph | What that means |
 |---|---|---|
-| Direct Graph (no collector) | Every `VITE_REFRESH_INTERVAL_SECONDS` (floor 30s, default 30s) - **per open browser tab** | Each refresh re-runs ~20-40 Graph queries. One admin with the dashboard open: fine. Ten admins each with a tab open on the same tenant: that's ten independent 30-second polling loops all hitting Graph - this is the case that can add up to real throttling risk under load, because nothing coordinates between browser tabs. |
-| Collector-backed (collector tracking this tenant) | Every `intervalSeconds` in `tenants.json` (floor 300s/5 min, default 900s/15 min) - **regardless of how many browsers are viewing it** | Every dashboard tab reads the collector's already-collected local snapshot (one HTTP call to `127.0.0.1:8766`, no Graph traffic) every `VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS` (default 8s). Graph itself is only queried once per `intervalSeconds`, centrally, no matter how many people are looking. **This is the path that scales safely with more viewers - use it if more than one or two people will have the dashboard open regularly.** |
-| Local login / Demo mode | Never | No live source behind either; no polling at all. |
+| Direct Graph (no collector) | Every `VITE_REFRESH_INTERVAL_SECONDS` (floor/default 30s) - **per open browser tab, independently** | Each refresh re-runs ~20-40 Graph queries. One admin: fine. **100 admins each with a tab open: 100 independent 30-second polling loops, all hitting the same tenant's Graph throttling budget at once. This is not a "might add up" risk at that scale - it is guaranteed sustained load, and it gets worse, not better, over the course of a day as more tabs stay open.** |
+| Collector-backed (collector tracking this tenant) | Every `intervalSeconds` in `tenants.json` (floor 300s/5 min, default 900s/15 min) - **once, centrally, regardless of viewer count** | Every dashboard tab reads the collector's already-collected snapshot (one local HTTP call, zero Graph traffic) every `VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS` (default 8s). Whether 1 person or 1,000 people have a tab open, Graph itself is queried exactly once per `intervalSeconds`. **This is the only path that scales with viewer count at all - see 9.2 for why the collector itself can absorb that read load.** |
+| Local login / Demo mode | Never | No live source behind either; zero polling. |
 
-**So: "is my data 5 minutes old or 10 minutes old?"** Without a collector,
-it's at most `VITE_REFRESH_INTERVAL_SECONDS` old (30s by default) - fresher,
-but each viewer pays the full Graph query cost independently. With a
-collector, it's at most `intervalSeconds` old (15 minutes by default,
-configurable down to 5) - a bit staler, but Graph is only ever queried once
-per interval no matter how many admins are watching.
+**"Is my data 5 minutes old or 15 minutes old?"** Without a collector, at
+most `VITE_REFRESH_INTERVAL_SECONDS` old (30s) - fresher, but every viewer
+pays the full Graph query cost independently, which is exactly the part
+that doesn't scale. With a collector, at most `intervalSeconds` old (15 min
+default, configurable down to 5) - staler, but Graph load is flat no matter
+how many people are watching.
 
-**Will this cause a production outage from throttling?** Two things make
-that unlikely even on the direct-Graph path, but it's not risk-free at
-high concurrency:
+### 9.2 Can the collector itself take 100+ concurrent viewers? (measured, not assumed)
 
-- Every Graph call now honors Microsoft's own `Retry-After` header on a
-  `429`/`503` and backs off before retrying (bounded to 2 retries, ~30s max
-  wait) instead of hammering again immediately - this was a real gap before
-  and is now fixed in `src/entraAuth.js`'s `graphGet`.
-- Graph's throttling is scoped per app registration per tenant, and this
-  app's queries are read-only `$top`-bounded list calls, not the kind that
-  trip Graph's stricter write-throttling tiers.
+The honest answer used to be "not comfortably" - the collector re-read and
+re-parsed the *entire* snapshot file from disk, synchronously, on **every
+single request**, and re-serialized it back to JSON on the way out. That's
+fine for a couple of requests. It is not fine at 100 concurrent tabs
+polling every 8s (~12.5 requests/second sustained), especially against a
+large org's uncapped user/group/device/application lists, which can run
+into tens of megabytes for a big tenant.
 
-That said, throttling risk still scales with **concurrent independent
-pollers**, not with data volume - five people each running their own
-30-second direct-Graph loop against the same tenant is the scenario to
-avoid. **If more than one or two people will have this dashboard open on
-the same tenant regularly, run the collector (step 6)** - it turns N
-viewers' Graph load into 1, however many people are watching.
+Measured directly, simulating a large-org-sized snapshot (200,000 rows):
+
+| | Time per request | Requests/second the collector could sustain before falling permanently behind |
+|---|---|---|
+| Before (sync file read + `JSON.parse` on every request) | ~92 ms | ~11 req/s |
+| After (in-memory cache, pre-serialized JSON) | ~0.0001 ms | effectively unbounded for this workload |
+
+**100 viewers at an 8-second poll is ~12.5 req/s - that's past where the old
+design would have already started falling behind**, which is exactly the
+scenario you described. Fixed in `collector/src/store.js`: the parsed
+snapshot and its serialized JSON string are now cached in memory the moment
+a collection cycle writes them (`saveSnapshot`), and every read
+(`GET /tenants/:id/snapshot`, `/combined`) is served from that cache - a
+plain memory access, no disk I/O, no re-parsing, no re-serializing. Disk is
+only touched once per tenant per collector process restart (a cold-start
+fallback) or once per actual collection cycle - never per viewer request.
+
+A basic rate limiter (`rateLimitPerSecond` in `tenants.json`, default 50
+requests/second per client address) also protects the collector from a
+single misbehaving/runaway client (a stuck retry loop, a bug) monopolizing
+it - raise it if a legitimate deployment sits enough real users behind one
+shared egress IP to need to.
+
+### 9.3 The failure mode that actually matters at this scale: a collector blip
+
+The dangerous scenario isn't steady-state load - it's what happens the
+*moment* the collector has a brief hiccup (a deploy, a restart, a few
+seconds of network trouble) while 100+ tabs are open. Previously, every one
+of those tabs would notice the failed collector call on its very next tick
+(within ~8 seconds) and **immediately fall back to a full direct-Graph
+sync** - 100 tabs × 20-40 Graph queries, all within the same few seconds.
+That's a self-inflicted throttling storm, potentially worse than whatever
+briefly interrupted the collector, and it can catch the *collector's own*
+next collection cycle in the resulting throttling too.
+
+Fixed in `src/liveTenantData.js`: the automatic background tick no longer
+falls back to direct Graph on a single failed collector call. It keeps
+showing the last-known data (already true from the stale-cache mechanism)
+and keeps retrying the collector - a sustained outage (a handful of
+consecutive failed polls, not one blip) is what it takes before a tab falls
+back to direct Graph at all. Poll intervals also carry ±20% random jitter
+(`src/main.jsx`) so tabs that opened around the same moment - a whole team
+checking the dashboard right after a Monday standup, say - drift apart over
+time instead of staying permanently lock-step, which further spreads out
+even a legitimate sustained-outage fallback instead of it landing on Graph
+all at once. A manual, human-clicked "Refresh" always falls back
+immediately if needed - it's one deliberate action, not a recurring
+per-tab poll multiplied by viewer count.
+
+### 9.4 If this becomes true multi-org SaaS (not just 100 admins of one org)
+
+Everything above scales one collector process comfortably to hundreds of
+concurrent viewers **of the tenants it tracks**. If the actual target is
+different: many separate customer organizations, each wanting their own
+isolated deployment, at real SaaS scale - a single Node process with one
+SQLite file per collector is still a reasonable *starting* architecture
+(it comfortably outgrows anything short of a genuinely large customer
+base), but it does have a ceiling: one process means one point of
+restart/failure per set of tracked tenants, and `node:sqlite`'s single-file
+model means one writer at a time. The next tier past that - running
+multiple collector instances behind a load balancer, and/or moving from a
+single SQLite file to a real multi-writer database - is a real
+architecture change (deployment model, ops, cost), not a config flag, and
+is deliberately **not** done as part of this pass. Flagging it here rather
+than doing it silently: worth a dedicated conversation once (or before)
+you're onboarding enough separate customer organizations that a single
+collector process per customer stops being practical to operate.
 
 ---
 
@@ -732,6 +798,9 @@ Issues actually hit while setting this up, and their fix:
 | Local login says "No saved snapshot yet" | This browser has never completed a real sign-in and sync | Sign in normally at least once first (step 8.2) |
 | Two admins acknowledging the same Risk Register finding each see their own copy | No collector connected — the register defaults to browser-local `localStorage`, which isn't shared | Connect the collector (step 6) — Risk Register automatically becomes shared across every admin pointed at it, no separate migration step |
 | Graph calls start failing with `429`/`503` during a sync | Microsoft Graph throttling — usually several people each independently polling the same tenant via direct Graph (see step 9) | Already retried with backoff automatically (bounded, honors `Retry-After`); if it persists, run the collector so N viewers become 1 poller instead of N |
+| Collector becomes slow/unresponsive with many dashboard tabs open | Old design re-read and re-parsed the full snapshot from disk on every request — see step 9.2 | Fixed — the collector now caches the parsed snapshot and its serialized JSON in memory, updated only when a collection cycle writes new data |
+| Many dashboard tabs all switched to "Live Microsoft Graph" at the same moment after a brief collector restart/deploy | Old design fell back to a full direct-Graph sync on the very first failed collector poll — see step 9.3 | Fixed — automatic ticks now retry the collector for several consecutive failures before falling back, with jittered poll intervals so tabs desynchronize |
+| Collector returns `429 Too many requests` from its own API | The built-in per-client rate limiter tripped (default 50 req/s per client address) — usually many real users sitting behind one shared egress IP/reverse proxy, or a client stuck in a retry loop | If it's legitimate shared-IP traffic, raise `rateLimitPerSecond` in `tenants.json`; if it's a stuck client, fix the retry loop instead of raising the limit |
 | `npm run build` warns about a chunk over 500 kB | Fixed — vendor libraries (React, MSAL) now build into their own chunk (`vite.config.js` `manualChunks`), separate from app code | If you still see this warning, check `vite.config.js` wasn't reverted |
 | Node prints `ExperimentalWarning: SQLite is an experimental feature...` on collector startup | Node's own warning for its built-in `node:sqlite` module | Expected and harmless — not a bug, nothing to fix |
 

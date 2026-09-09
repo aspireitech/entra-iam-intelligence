@@ -112,14 +112,33 @@ export async function syncLiveTenantData(){
 // Graph traffic) over a live Graph pull, when a collector is configured and already
 // tracking this signed-in tenant. Falls back to the direct Graph fetch otherwise -
 // the dashboard must never go blank just because the collector isn't running.
-export async function syncTenantData(){
+//
+// allowDirectFallback:false is for the AUTOMATIC background refresh tick only.
+// Without it, a brief collector blip - a deploy, a restart, a transient network
+// hiccup - would make every open dashboard tab across the org fall back to a full
+// direct-Graph sync (~20-40 queries each) on its very next tick, all within
+// seconds of each other. With 100+ tabs open, that's a self-inflicted throttling
+// storm that can be worse than whatever caused the blip. Automatic ticks instead
+// keep retrying the collector for a few cycles (showing the last-known data
+// meanwhile - see App()'s "stale-cache"/collector status text) before finally
+// allowing a direct-Graph fallback; a manual, human-triggered refresh always
+// allows it immediately, since that's a single deliberate action, not a
+// synchronized recurring poll.
+let consecutiveCollectorFailures=0;
+const COLLECTOR_FAILURE_THRESHOLD=4; // ~4 missed polls of sustained outage, not just one blip
+export async function syncTenantData({allowDirectFallback=true}={}){
   const tenantId=sessionStorage.getItem('iam_tenant_id');
   if(tenantId){
     const result=await getTenantSnapshotFromCollector(tenantId);
     if(result.ok){
+      consecutiveCollectorFailures=0;
       const snapshot={...result.data,dataSource:'collector'};
       cacheAndBroadcast(snapshot);
       return snapshot;
+    }
+    consecutiveCollectorFailures+=1;
+    if(!allowDirectFallback&&consecutiveCollectorFailures<COLLECTOR_FAILURE_THRESHOLD){
+      throw new Error(`Collector unreachable (attempt ${consecutiveCollectorFailures}/${COLLECTOR_FAILURE_THRESHOLD}) - retrying the collector before falling back to direct Graph.`);
     }
   }
   return syncLiveTenantData();

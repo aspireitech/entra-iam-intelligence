@@ -133,6 +133,14 @@ Edit `tenants.json`:
   paste into `VITE_COLLECTOR_TOKEN`. Run it again any time to rotate the
   token — anything still configured with the old value starts getting 401s
   until updated.
+- `rateLimitPerSecond` (optional, default `50`) — the collector's HTTP API
+  rate-limits requests per client address, to protect the single Node
+  process from a stuck client retry loop rather than to constrain real
+  usage: 50/s per address is well above what even a large number of real
+  dashboard viewers produce (each tab polls once every several seconds), so
+  this should only ever trip on a bug or abuse. Raise it only if a
+  legitimate deployment puts many real users behind one shared egress IP
+  (a corporate proxy, for example) and they're tripping it in practice.
 
 ## 4. Run it
 
@@ -482,6 +490,22 @@ Endpoints: `GET /tenants/:id/risk-register` lists entries; `PUT
 /tenants/:id/risk-register/:key` (body: `{note, title, category}`) creates
 or updates one (`note` is required — an acknowledgment always needs a
 reason); `DELETE /tenants/:id/risk-register/:key` removes one.
+
+## Serving many concurrent viewers
+
+`GET /tenants/:id/snapshot` and `/combined` are served from an in-memory
+cache of each tenant's last collected snapshot (both the parsed object and
+its already-serialized JSON string), populated the moment a collection
+cycle finishes — not re-read and re-parsed from disk on every request.
+That matters because every open dashboard tab polls this endpoint every
+`VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS` (default 8s) independently: at
+100+ concurrent viewers on a large tenant (uncapped user/group/device/
+application lists can run tens of megabytes), re-parsing that JSON
+synchronously on every single request would block this single-process
+server's one event-loop thread badly enough to make it the actual
+bottleneck. See `RUNBOOK.md` §9 for the measured before/after numbers and
+the related fix to how the dashboard falls back when the collector briefly
+blips (it no longer stampedes every open tab to direct Graph at once).
 
 ## What this version does and doesn't do
 

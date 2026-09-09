@@ -4,15 +4,59 @@ import { fileURLToPath } from 'node:url';
 
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 
+// In-memory cache, keyed by tenant ID, of both the parsed snapshot object and its
+// already-serialized JSON string. Without this, every single HTTP request for a
+// tenant's snapshot (GET /tenants/:id/snapshot, and every /combined call for every
+// tenant) did a synchronous fs.readFileSync + JSON.parse from disk, and the server
+// re-ran JSON.stringify on the full object again on the way out. That's fine for a
+// handful of requests, but this collector is meant to serve every open dashboard
+// tab across an organization: at 100 concurrent viewers polling every ~8s, that's
+// ~12.5 requests/second, and a large tenant's snapshot (uncapped user/group/device/
+// application lists - tens of thousands of rows in a big org) can run into tens of
+// megabytes. Synchronously parsing/serializing that repeatedly, on Node's single
+// event-loop thread, blocks every other request (including collection itself)
+// while it happens - the collector becomes the bottleneck, not Microsoft Graph.
+// Caching the object AND its serialized form turns a request into an O(1) memory
+// read with zero parsing/serialization, regardless of viewer count or tenant size.
+// Safe because this process is the only writer: saveSnapshot() is the only thing
+// that changes a tenant's data, and it updates the cache in the same call that
+// writes to disk.
+const cache = new Map(); // tenantId -> { snapshot, json }
+
 export function saveSnapshot(tenantId, snapshot) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(path.join(DATA_DIR, `${tenantId}.json`), JSON.stringify(snapshot, null, 2));
+  const json = JSON.stringify(snapshot, null, 2);
+  fs.writeFileSync(path.join(DATA_DIR, `${tenantId}.json`), json);
+  cache.set(tenantId, { snapshot, json });
+}
+
+function loadFromDisk(tenantId) {
+  const file = path.join(DATA_DIR, `${tenantId}.json`);
+  if (!fs.existsSync(file)) return null;
+  const json = fs.readFileSync(file, 'utf8');
+  const snapshot = JSON.parse(json);
+  const entry = { snapshot, json };
+  cache.set(tenantId, entry);
+  return entry;
+}
+
+// Cold-start fallback only: the very first read for a tenant after a process
+// restart (before that tenant's next collection cycle) still has to touch disk
+// once. Every read after that is served from the in-memory cache instead.
+function getEntry(tenantId) {
+  return cache.get(tenantId) || loadFromDisk(tenantId);
 }
 
 export function loadSnapshot(tenantId) {
-  const file = path.join(DATA_DIR, `${tenantId}.json`);
-  if (!fs.existsSync(file)) return null;
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
+  return getEntry(tenantId)?.snapshot ?? null;
+}
+
+// The pre-serialized string for this tenant, for handlers that just want to write
+// the response body directly (server.js's /tenants/:id/snapshot route) without
+// paying to re-stringify an object that was already stringified once at
+// collection time.
+export function getSnapshotJson(tenantId) {
+  return getEntry(tenantId)?.json ?? null;
 }
 
 export function loadAllSnapshots(tenantIds) {

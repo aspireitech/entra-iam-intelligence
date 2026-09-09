@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { loadAllSnapshots, loadSnapshot, combineSnapshots } from './store.js';
+import { loadAllSnapshots, loadSnapshot, getSnapshotJson, combineSnapshots } from './store.js';
 import { certExpiry } from './msal.js';
 import { getHistory, getDelta, getAppEvents, listReportSchedules, createReportSchedule, deleteReportSchedule, listRiskRegister, upsertRiskRegisterEntry, deleteRiskRegisterEntry } from './db.js';
 import { REPORT_DEFINITIONS, generateReportCsv } from './reports.js';
@@ -13,6 +13,45 @@ function json(res, status, payload) {
   });
   res.end(JSON.stringify(payload));
 }
+
+// For handlers that already have a pre-serialized JSON string on hand (see
+// store.js's getSnapshotJson) - writes it directly instead of parsing it back
+// into an object just to hand it to JSON.stringify again.
+function rawJson(res, status, jsonString) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'X-IAM-Collector-Token,Content-Type',
+  });
+  res.end(jsonString);
+}
+
+// Fixed-window rate limit, keyed by remote address - generous enough that the
+// traffic pattern real dashboard viewers produce never comes close (one poll
+// every several seconds per open tab), but catches a single client stuck in a
+// fast retry loop before it can monopolize this single-process server. Behind a
+// reverse proxy that terminates all connections from one address (see
+// collector/README.md's IIS section), every client shares one bucket - raise
+// rateLimitPerSecond in tenants.json if that's a legitimate high-traffic setup
+// rather than removing the protection.
+const RATE_LIMIT_WINDOW_MS = 1000;
+const rateBuckets = new Map(); // remoteAddress -> { count, windowStart }
+function rateLimited(remoteAddress, maxPerSecond) {
+  const now = Date.now();
+  const bucket = rateBuckets.get(remoteAddress);
+  if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    rateBuckets.set(remoteAddress, { count: 1, windowStart: now });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > maxPerSecond;
+}
+// Sweep stale buckets periodically so long-running processes don't accumulate
+// an entry per distinct client address forever.
+setInterval(() => {
+  const cutoff = Date.now() - 60_000;
+  for (const [key, bucket] of rateBuckets) if (bucket.windowStart < cutoff) rateBuckets.delete(key);
+}, 60_000).unref();
 
 function csv(res, filename, content) {
   res.writeHead(200, {
@@ -74,6 +113,10 @@ async function handleRequest(req, res, config) {
       });
       return res.end();
     }
+    if (rateLimited(req.socket.remoteAddress, Number(config.rateLimitPerSecond) || 50)) {
+      res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '1' });
+      return res.end(JSON.stringify({ error: 'Too many requests' }));
+    }
     if (!authorized(req, config)) return json(res, 401, { error: 'Unauthorized' });
 
     const url = new URL(req.url, 'http://localhost');
@@ -102,9 +145,13 @@ async function handleRequest(req, res, config) {
 
     const tenantMatch = url.pathname.match(/^\/tenants\/([^/]+)\/snapshot$/);
     if (tenantMatch) {
-      const snap = loadSnapshot(tenantMatch[1]);
-      if (!snap) return json(res, 404, { error: 'No snapshot collected yet for this tenant' });
-      return json(res, 200, snap);
+      // This is the hottest path in the whole API - every open dashboard tab hits
+      // it every few seconds. getSnapshotJson returns the string already produced
+      // at collection time (see store.js) instead of re-serializing the object on
+      // every request.
+      const snapJson = getSnapshotJson(tenantMatch[1]);
+      if (!snapJson) return json(res, 404, { error: 'No snapshot collected yet for this tenant' });
+      return rawJson(res, 200, snapJson);
     }
 
     if (url.pathname === '/combined') {
