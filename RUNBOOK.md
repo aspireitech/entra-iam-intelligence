@@ -441,8 +441,9 @@ curl -s http://127.0.0.1:8766/health -H "X-IAM-Collector-Token: <the token from 
   "status": "ok",
   "version": "0.1.0",
   "tenantCount": 2,
+  "staleThresholdSeconds": 1800,
   "tenants": [
-    { "id": "...", "displayName": "Tenant A", "certExpiresInDays": 729, "certExpiresAt": "..." }
+    { "id": "...", "displayName": "Tenant A", "certExpiresInDays": 729, "certExpiresAt": "...", "lastCollectedAt": "...", "lastCollectedSecondsAgo": 312, "stale": false }
   ],
   "emailConfigured": false,
   "collectedAt": "..."
@@ -453,6 +454,17 @@ curl -s http://127.0.0.1:8766/health -H "X-IAM-Collector-Token: <the token from 
 - `certExpiresInDays` is a positive number close to 730 (fresh cert from
   step 6.2) — not `null` and not negative.
 - `emailConfigured` is `true` only if you completed step 6.6.
+- **`stale` is the field to watch for "is data actually current" troubleshooting**:
+  `false` means this tenant's most recent successful collection is younger
+  than `staleThresholdSeconds` (2x `intervalSeconds`); `true` — or the
+  top-level `status` reading `"degraded"` instead of `"ok"` — means no
+  tenant here has collected successfully within that window, which is the
+  real "is the scheduled snapshot job actually working" signal (not just
+  "is the process running"). The Data Sources page in the dashboard itself
+  shows this same per-tenant last-collected time and stale/current status,
+  no command line needed. For the full history behind any one tenant (every
+  snapshot in the last day/week/month, not just the latest), query
+  `/tenants/<id>/history?days=7` (or `30`) directly.
 - A `401` response here means the token in the `curl` command doesn't match
   `tenants.json` — re-check step 6.5.
 - A connection-refused error means the collector process isn't running —
@@ -801,6 +813,9 @@ Issues actually hit while setting this up, and their fix:
 |---|---|---|
 | Dashboard shows "Collector unavailable" even though the collector process is running | `collectorToken` in `tenants.json` doesn't exactly match `VITE_COLLECTOR_TOKEN` in `.env` | Re-run `node collector/scripts/generate-token.js`, copy the printed value into `.env`, restart both processes (step 6.5/6.7) |
 | `curl .../health` returns `401` | Same as above, or the token has a typo/extra whitespace | Same fix — never hand-type this value in two places |
+| `(Get-Content tenants.json \| ConvertFrom-Json).collectorToken` prints the literal text `REPLACE-WITH-A-LONG-RANDOM-TOKEN` | This collector was set up before `generate-token.js` existed, and the example placeholder was never replaced — the collector has been running with that exact, publicly-known string as its real access token | Run `node scripts/generate-token.js` now to replace it with a real random one, update `VITE_COLLECTOR_TOKEN` in `.env.production` to match, rebuild the dashboard, and restart the collector process |
+| Dashboard shows "Live Microsoft Graph" / 30s refresh instead of "Collector snapshot" / 8s, even though the collector is running and healthy | `VITE_COLLECTOR_URL`/`VITE_COLLECTOR_TOKEN` were never added to the **dashboard's** `.env.production` — the collector running on the server doesn't automatically get used; the SPA has to be built knowing where it is | Add both to `.env.production` (step 6.7) and `npm run build` again — the collector itself being healthy doesn't help until the dashboard is told about it |
+| `/health` shows `"stale": true` or `"status": "degraded"` for a tenant | The scheduled collection has stopped actually succeeding for that tenant (lost admin consent, expired/rotated certificate, a persistent Graph error) — the collector process itself is still running fine, which is exactly why this needed its own field instead of relying on "is the process up" | Check the collector's own console/service log for that tenant's collection errors around its last successful `lastCollectedAt` |
 | IIS home page returns `500 - Internal server error` after adding the collector reverse proxy | `public/web.config`'s `<rewrite>` section was created before the URL Rewrite/ARR modules were installed | Delete `dist/web.config` and `public/web.config`, install both modules, `iisreset`, then recreate `web.config` (step 6.10) |
 | Collector reverse-proxy request returns `404` | URL Rewrite/ARR not installed, or IIS not reset since | Install both modules and run `iisreset` |
 | Collector reverse-proxy request returns `502` | Collector process isn't running on the server | Check the collector's own status (step 6.9's `Get-Service`/`systemctl status`) |
