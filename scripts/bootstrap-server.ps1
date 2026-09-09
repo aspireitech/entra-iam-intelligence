@@ -66,7 +66,12 @@ if ($RestoreFromBackup) {
   $tenantsJson = Join-Path $CollectorRoot 'tenants.json'
   if (-not (Test-Path $tenantsJson)) {
     Copy-Item (Join-Path $CollectorRoot 'tenants.example.json') $tenantsJson
-    Write-Host "Created collector/tenants.json from the example - EDIT IT before starting: set collectorToken and the tenant ID(s)." -ForegroundColor Yellow
+    # Fill in a real random collectorToken now instead of leaving the
+    # "REPLACE-WITH-A-LONG-RANDOM-TOKEN" placeholder for someone to forget -
+    # a placeholder/weak token is the most common collector setup mistake
+    # (every request then fails with a silent 401).
+    node (Join-Path $CollectorRoot 'scripts\generate-token.js')
+    Write-Host "Created collector/tenants.json from the example, with a random collectorToken already filled in. Still EDIT IT before starting: set the tenant ID(s)." -ForegroundColor Yellow
   } else {
     Write-Host "collector/tenants.json already present - leaving it as is." -ForegroundColor Green
   }

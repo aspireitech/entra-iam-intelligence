@@ -67,7 +67,12 @@ else
 
   if [ ! -f "tenants.json" ]; then
     cp tenants.example.json tenants.json
-    echo "Created collector/tenants.json from the example - EDIT IT before starting: set collectorToken and the tenant ID(s)."
+    # Replace the placeholder collectorToken with a real random one now, rather
+    # than leaving "REPLACE-WITH-A-LONG-RANDOM-TOKEN" for someone to forget to
+    # change - a placeholder/weak token here is the most common collector setup
+    # mistake (every request then fails with a silent 401).
+    node scripts/generate-token.js
+    echo "Created collector/tenants.json from the example, with a random collectorToken already filled in. Still EDIT IT before starting: set the tenant ID(s)."
   else
     echo "collector/tenants.json already present - leaving it as is."
   fi

@@ -376,6 +376,8 @@ export async function collectTenant(tenant, config) {
       available: appCredentials.ok,
       items: credentialItems.slice(0, 50),
       expiringSoon: appCredentials.ok ? credentialItems.filter((i) => i.daysRemaining <= 30).length : null,
+      expiredSecrets: appCredentials.ok ? credentialItems.filter((i) => i.daysRemaining < 0 && i.type === 'secret').length : null,
+      expiredCerts: appCredentials.ok ? credentialItems.filter((i) => i.daysRemaining < 0 && i.type === 'certificate').length : null,
     },
     permissionFailures: results.filter((r) => !r.ok).map((r) => String(r.error?.message || r.error)),
     collectedAt,

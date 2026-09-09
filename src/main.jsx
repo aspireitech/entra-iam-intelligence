@@ -2,8 +2,11 @@ import React,{useEffect,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './styles.css';
 import {connectSecurityScopes,connectLicenseScopes,connectGovernanceScopes,getLicenseSnapshot,getAppConsentSnapshot,getSignInTrend,signOut} from './entraAuth.js';
-import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents} from './dataSources.js';
-import {syncTenantData,getCachedOverview} from './liveTenantData.js';
+import {DATA_SOURCES,getActiveSource,setActiveSource,sourceById,checkAdAgent,getAdSnapshot,checkCollector,getCombinedSnapshot,getTenantDelta,getAppEvents,listReportSchedules,createReportSchedule,deleteReportSchedule,sendReportNow,listRiskRegister,upsertRiskRegisterEntry,deleteRiskRegisterEntry} from './dataSources.js';
+import {syncTenantData,getCachedOverview,getLocalSnapshot} from './liveTenantData.js';
+import {isDemoMode,exitDemoMode} from './demoMode.js';
+import {buildDemoSnapshot} from './demoData.js';
+import {isLocalLoginMode,exitLocalLoginMode} from './localLogin.js';
 
 const NAV_GROUPS=[
   {section:null,items:[['Overview','⌂']]},
@@ -15,12 +18,12 @@ const NAV_GROUPS=[
 // Labels rendered in the sidebar but with no working detail view yet - shown as
 // a "Coming soon" placeholder on click instead of being hidden outright, so the
 // roadmap is visible rather than making it look like functionality disappeared.
-const PLACEHOLDER_LABELS=new Set(['Access Reviews','Provisioning','Audit Logs','Alerts','Workflows','Reports','Data Explorer','Settings']);
+const PLACEHOLDER_LABELS=new Set(['Access Reviews','Provisioning','Audit Logs','Alerts','Workflows','Data Explorer','Settings']);
 // Which nav labels appear for each source today. Working views plus the
 // placeholder labels above (placeholders only make sense once real Entra
 // data is flowing, so they're scoped to the entra source).
 const NAV_BY_SOURCE={
-  entra:['Overview','Users','Guests','Groups','Devices','Applications','Risk Overview','Privileged Access','Non-Human Identities','Toxic Combinations','Legacy Authentication','Sign-ins','Conditional Access','Risk Register','App Consent','Licenses','Data Sources',...PLACEHOLDER_LABELS],
+  entra:['Overview','Users','Guests','Groups','Devices','Applications','Risk Overview','Privileged Access','Non-Human Identities','Toxic Combinations','Legacy Authentication','Sign-ins','Conditional Access','Risk Register','App Consent','Licenses','Reports','Data Sources',...PLACEHOLDER_LABELS],
   ad:['Overview','Data Sources'],
   combined:['Overview','Data Sources'],
   sailpoint:['Data Sources'],
@@ -43,6 +46,36 @@ const pct=(n,d)=>n==null||!d?'—':`${((n/d)*100).toFixed(1)}%`;
 const EXCEPTIONS_KEY='iam_attention_exceptions';
 function loadExceptions(){try{return JSON.parse(localStorage.getItem(EXCEPTIONS_KEY)||'{}');}catch{return{};}}
 function saveExceptions(map){try{localStorage.setItem(EXCEPTIONS_KEY,JSON.stringify(map));}catch{/* ignore quota/private-mode errors */}}
+// Risk Register exceptions (Need Attention + Toxic Combination acknowledgments):
+// shared across every admin via the collector's database when one is connected
+// and tracking this tenant, so two admins looking at the same tenant see the same
+// acknowledgments - not each their own copy. Falls back to this browser's
+// localStorage when no collector is available, so acknowledging still works
+// standalone; it just isn't shared until a collector is connected.
+function useRiskRegister(tenantId,collectorStatus){
+  const collectorReady=Boolean(collectorStatus?.connected&&tenantId);
+  const [exceptions,setExceptions]=useState(()=>collectorReady?{}:loadExceptions());
+  useEffect(()=>{
+    if(!collectorReady){setExceptions(loadExceptions());return;}
+    let cancelled=false;
+    listRiskRegister(tenantId).then(r=>{
+      if(cancelled)return;
+      if(r.ok){const map={};for(const row of r.data.entries||[])map[row.key]={note:row.note,at:row.at,title:row.title,category:row.category};setExceptions(map);}
+      else setExceptions(loadExceptions()); // collector unreachable right now - fall back rather than show nothing
+    });
+    return()=>{cancelled=true;};
+  },[collectorReady,tenantId]);
+  const acknowledge=(key,entry)=>{
+    const record={...entry,at:entry.at||new Date().toISOString()};
+    setExceptions(prev=>{const next={...prev,[key]:record};if(!collectorReady)saveExceptions(next);return next;});
+    if(collectorReady)upsertRiskRegisterEntry(tenantId,key,record);
+  };
+  const unacknowledge=key=>{
+    setExceptions(prev=>{const next={...prev};delete next[key];if(!collectorReady)saveExceptions(next);return next;});
+    if(collectorReady)deleteRiskRegisterEntry(tenantId,key);
+  };
+  return {exceptions,acknowledge,unacknowledge,shared:collectorReady};
+}
 // Graph has no "break-glass account" flag - only an admin knows which accounts are
 // designated emergency access. Stored locally (like exceptions above) since there's no
 // backend yet to share this across users.
@@ -116,29 +149,40 @@ function AppEventsCard({events}){
 }
 
 function ApplicationsDetailPage({data}){
-  const [q,setQ]=useFilter();const [bucket,setBucket]=useState('all');const [credThreshold,setCredThreshold]=useState(30);const [credOnly,setCredOnly]=useState(false);const [trendDays,setTrendDays]=useState(30);const [focus,setFocus]=useState(null);
+  const [q,setQ]=useFilter();const [bucket,setBucket]=useState('all');const [credThreshold,setCredThreshold]=useState(30);const [credOnly,setCredOnly]=useState(false);const [credExpiredOnly,setCredExpiredOnly]=useState(null);const [trendDays,setTrendDays]=useState(30);const [focus,setFocus]=useState(null);
   const tenantId=data.organization?.id;
   const {delta,events}=useCollectorHistory(tenantId,trendDays);
   const details=data.appDetails||[];
-  const credByApp=new Map((data.credentialExpiry?.items||[]).map(c=>[c.appId,c]));
+  // Group every credential by appId (an app can have more than one secret/cert),
+  // keeping the whole list per app - not just the last one seen - so "expired
+  // secret/cert only" filtering can check every credential on the app, not just
+  // whichever happened to be iterated last. credByApp then picks the single most
+  // urgent (soonest-expiring) credential per app for the inventory table column.
+  const credItemsByApp=new Map();
+  for(const c of data.credentialExpiry?.items||[]){if(!credItemsByApp.has(c.appId))credItemsByApp.set(c.appId,[]);credItemsByApp.get(c.appId).push(c);}
+  const credByApp=new Map([...credItemsByApp].map(([id,items])=>[id,items[0]]));
+  const b=data.appActivity||{};
+  const appTotal=data.appPopulation??data.applications;
   const matchesBucket=a=>bucket==='all'||a.bucket===bucket||(bucket==='90plus'&&(a.bucket==='91-180'||a.bucket==='180+'));
-  const filtered=details.filter(a=>matchesBucket(a)&&(!q||a.name.toLowerCase().includes(q.toLowerCase()))&&(!credOnly||(credByApp.get(a.appId)?.daysRemaining??Infinity)<=credThreshold));
-  const goInventory=(nextBucket,nextCredOnly=false)=>{setBucket(nextBucket);setCredOnly(nextCredOnly);goTo(setFocus,'app-inventory');};
+  const matchesExpired=a=>!credExpiredOnly||(credItemsByApp.get(a.appId)||[]).some(c=>c.daysRemaining<0&&c.type===credExpiredOnly);
+  const filtered=details.filter(a=>matchesBucket(a)&&matchesExpired(a)&&(!q||a.name.toLowerCase().includes(q.toLowerCase()))&&(!credOnly||(credByApp.get(a.appId)?.daysRemaining??Infinity)<=credThreshold));
+  const goInventory=(nextBucket,nextCredOnly=false,nextExpiredOnly=null)=>{setBucket(nextBucket);setCredOnly(nextCredOnly);setCredExpiredOnly(nextExpiredOnly);goTo(setFocus,'app-inventory');};
   const sections=[
+    {id:'app-usage',node:<section className="grid top-grid single"><Card title="Application Usage Overview" className="usage"><div className="usage-body"><Donut segments={[{value:b.active30,color:'#31b75a'},{value:b.inactive31to90,color:'#f1a21a'},{value:b.inactive91to180,color:'#e86c32'},{value:b.inactive180,color:'#e85555'}]} total={appTotal} label="Observed Apps"/><div className="legend">{[['Active (≤30 Days)',b.active30,'green'],['Inactive (31–90 Days)',b.inactive31to90,'amber'],['Inactive (91–180 Days)',b.inactive91to180,'orange'],['Inactive (>180 Days)',b.inactive180,'red']].map(([name,v,c])=><div key={name}><i className={c}/>{name}<b>{fmt(v)} <small>{pct(v,appTotal)}</small></b></div>)}</div></div><div className="disclaimer">{data.appActivityAvailable?`All ${fmt(appTotal)} tenant applications, matched by appId to service-principal activity.`:'Beta activity report unavailable - showing application inventory only.'}</div></Card></section>},
     {id:'app-trend',node:<section className="grid top-grid single"><TrendCard tenantId={tenantId} trendDays={trendDays} setTrendDays={setTrendDays} delta={delta}/></section>},
     {id:'app-events',node:<section className="grid top-grid single"><AppEventsCard events={events}/></section>},
-    {id:'app-inventory',node:<section className="grid top-grid single"><Card title="Application Inventory">{!data.appActivityAvailable?<div className="empty-state">{data.appActivityReason?`Activity data unavailable: ${data.appActivityReason}`:'Service-principal activity report unavailable - showing inventory only.'}</div>:null}<FilterBar q={q} onQ={setQ} placeholder="Search application name…" count={filtered.length} total={details.length} exportRows={filtered} exportColumns={[{label:'Application',value:'name'},{label:'Status',value:a=>a.bucket==='active'?'Active':`Inactive (${a.bucket}d)`},{label:'Days Since Activity',value:a=>a.days==null?'Never observed':a.days},{label:'Credential Expiry',value:a=>{const c=credByApp.get(a.appId);return c?`${c.daysRemaining<0?'Expired':c.daysRemaining+'d'} (${c.type})`:'';}}]} exportFilename="application-inventory"><select className="filter-select" value={bucket} onChange={e=>setBucket(e.target.value)}><option value="all">All statuses</option><option value="active">Active (≤30d)</option><option value="31-90">Inactive 31-90d</option><option value="91-180">Inactive 91-180d</option><option value="180+">Inactive &gt;180d</option><option value="90plus">Inactive 90+ days (combined)</option></select><select className="filter-select" value={credThreshold} onChange={e=>setCredThreshold(Number(e.target.value))}><option value={15}>Flag credentials ≤15d</option><option value={30}>Flag credentials ≤30d</option><option value={60}>Flag credentials ≤60d</option><option value={90}>Flag credentials ≤90d</option></select><label className="filter-toggle"><input type="checkbox" checked={credOnly} onChange={e=>setCredOnly(e.target.checked)}/> Only apps at/under that threshold</label></FilterBar><div className="license-table"><table><thead><tr><th>Application</th><th>Status</th><th>Days Since Activity</th><th>Credential Expiry</th></tr></thead><tbody>{filtered.slice(0,300).map(a=>{const cred=credByApp.get(a.appId);return <tr key={a.appId}><td>{a.name}</td><td>{a.bucket==='active'?'Active':`Inactive (${a.bucket}d)`}</td><td>{a.days==null?'Never observed':fmt(a.days)}</td><td className={cred&&cred.daysRemaining<=credThreshold?'text-critical':''}>{cred?`${cred.daysRemaining<0?'Expired':cred.daysRemaining+'d'} (${cred.type})`:'—'}</td></tr>})}</tbody></table></div><div className="disclaimer">Status is calculated from /reports/servicePrincipalSignInActivities (beta), matched to this tenant's own {fmt(data.applications)} app registrations only - Microsoft first-party service principals are excluded.</div></Card></section>},
+    {id:'app-inventory',node:<section className="grid top-grid single"><Card title="Application Inventory">{!data.appActivityAvailable?<div className="empty-state">{data.appActivityReason?`Activity data unavailable: ${data.appActivityReason}`:'Service-principal activity report unavailable - showing inventory only.'}</div>:null}<FilterBar q={q} onQ={setQ} placeholder="Search application name…" count={filtered.length} total={details.length} exportRows={filtered} exportColumns={[{label:'Application',value:'name'},{label:'Status',value:a=>a.bucket==='active'?'Active':`Inactive (${a.bucket}d)`},{label:'Days Since Activity',value:a=>a.days==null?'Never observed':a.days},{label:'Credential Expiry',value:a=>{const c=credByApp.get(a.appId);return c?`${c.daysRemaining<0?'Expired':c.daysRemaining+'d'} (${c.type})`:'';}}]} exportFilename="application-inventory"><select className="filter-select" value={bucket} onChange={e=>setBucket(e.target.value)}><option value="all">All statuses</option><option value="active">Active (≤30d)</option><option value="31-90">Inactive 31-90d</option><option value="91-180">Inactive 91-180d</option><option value="180+">Inactive &gt;180d</option><option value="90plus">Inactive 90+ days (combined)</option></select><select className="filter-select" value={credThreshold} onChange={e=>setCredThreshold(Number(e.target.value))}><option value={15}>Flag credentials ≤15d</option><option value={30}>Flag credentials ≤30d</option><option value={60}>Flag credentials ≤60d</option><option value={90}>Flag credentials ≤90d</option></select><label className="filter-toggle"><input type="checkbox" checked={credOnly} onChange={e=>setCredOnly(e.target.checked)}/> Only apps at/under that threshold</label><label className="filter-toggle"><input type="checkbox" checked={credExpiredOnly==='secret'} onChange={e=>setCredExpiredOnly(e.target.checked?'secret':null)}/> Expired secrets only</label><label className="filter-toggle"><input type="checkbox" checked={credExpiredOnly==='certificate'} onChange={e=>setCredExpiredOnly(e.target.checked?'certificate':null)}/> Expired certs only</label></FilterBar><div className="license-table"><table><thead><tr><th>Application</th><th>Status</th><th>Days Since Activity</th><th>Credential Expiry</th></tr></thead><tbody>{filtered.slice(0,300).map(a=>{const cred=credByApp.get(a.appId);return <tr key={a.appId}><td>{a.name}</td><td>{a.bucket==='active'?'Active':`Inactive (${a.bucket}d)`}</td><td>{a.days==null?'Never observed':fmt(a.days)}</td><td className={cred&&cred.daysRemaining<=credThreshold?'text-critical':''}>{cred?`${cred.daysRemaining<0?'Expired':cred.daysRemaining+'d'} (${cred.type})`:'—'}</td></tr>})}</tbody></table></div><div className="disclaimer">Status is calculated from /reports/servicePrincipalSignInActivities (beta), matched to this tenant's own {fmt(data.applications)} app registrations only - Microsoft first-party service principals are excluded.</div></Card></section>},
   ];
   return <div className="source-page">
-    <Kpis items={[['Total Applications',data.applications,'▦',()=>goInventory('all')],['Active (≤30d)',data.appActivity?.active30,'✓',()=>goInventory('active')],['Inactive 90+ Days',(data.appActivity?.inactive91to180||0)+(data.appActivity?.inactive180||0),'⚠',()=>goInventory('90plus')],['Credentials ≤30d',data.credentialExpiry?.expiringSoon,'⏱',()=>{setCredThreshold(30);goInventory('all',true);}]]}/>
+    <Kpis items={[['Total Applications',data.applications,'▦',()=>goInventory('all')],['Active (≤30d)',data.appActivity?.active30,'✓',()=>goInventory('active')],['Inactive 90+ Days',(data.appActivity?.inactive91to180||0)+(data.appActivity?.inactive180||0),'⚠',()=>goInventory('90plus')],['Credentials ≤30d',data.credentialExpiry?.expiringSoon,'⏱',()=>{setCredThreshold(30);goInventory('all',true);}],['Expired Secrets',data.credentialExpiry?.expiredSecrets,'⛔',()=>goInventory('all',false,'secret')],['Expired Certs',data.credentialExpiry?.expiredCerts,'⛔',()=>goInventory('all',false,'certificate')]]}/>
     <SectionStack activeId={focus} sections={sections}/>
   </div>;
 }
 
-function ToxicCombinationsPage({data}){
-  const [exceptions,setExceptions]=useState(loadExceptions());
+function ToxicCombinationsPage({data,collectorStatus}){
+  const {exceptions,acknowledge:ackEntry}=useRiskRegister(data.organization?.id,collectorStatus);
   const [q,setQ]=useFilter();
-  const acknowledge=(id,name)=>{const note=window.prompt(`Note for accepting risk on ${name} (why is this acceptable)?`);if(note==null)return;const key=`toxic-${id}`;const next={...exceptions,[key]:{note,at:new Date().toISOString(),title:`Toxic combination: ${name}`,category:'Toxic Combination'}};setExceptions(next);saveExceptions(next);};
+  const acknowledge=(id,name)=>{const note=window.prompt(`Note for accepting risk on ${name} (why is this acceptable)?`);if(note==null)return;ackEntry(`toxic-${id}`,{note,title:`Toxic combination: ${name}`,category:'Toxic Combination'});};
   if(!data.toxicCombinationsAvailable)return <div className="source-page"><div className="empty-state large">Requires privileged-role data (RoleManagement.Read.Directory) plus at least one of MFA registration, ID Protection risk, or sign-in activity data.</div></div>;
   const all=data.toxicCombinations||[];
   const active=all.filter(c=>!exceptions[`toxic-${c.id}`]);
@@ -151,20 +195,31 @@ function ToxicCombinationsPage({data}){
   </div>;
 }
 
-function RiskRegisterPage(){
-  const [exceptions,setExceptions]=useState(loadExceptions());
-  const unacknowledge=key=>{const next={...exceptions};delete next[key];setExceptions(next);saveExceptions(next);};
+function RiskRegisterPage({data,collectorStatus}){
+  const {exceptions,unacknowledge,shared}=useRiskRegister(data?.organization?.id,collectorStatus);
   const entries=Object.entries(exceptions).sort((a,b)=>new Date(b[1].at)-new Date(a[1].at));
-  return <div className="source-page"><section className="grid top-grid single"><Card title={`Risk Register (${entries.length} exception${entries.length===1?'':'s'})`}>{!entries.length?<div className="empty-state large">No exceptions acknowledged yet. Acknowledge a Need Attention or Toxic Combination finding to add it here with an audit note.</div>:<div className="license-table"><table><thead><tr><th>Finding</th><th>Category</th><th>Note</th><th>Acknowledged</th><th></th></tr></thead><tbody>{entries.map(([key,ex])=><tr key={key}><td>{ex.title||key}</td><td>{ex.category||'—'}</td><td>{ex.note}</td><td>{new Date(ex.at).toLocaleString()}</td><td><button className="ack-chip" onClick={()=>unacknowledge(key)}>Undo</button></td></tr>)}</tbody></table></div>}<div className="disclaimer">Stored in this browser's local storage only - not shared across users or synced yet. Treat this as a personal working register, not a compliance record of record, until backend storage is added to the collector.</div></Card></section></div>;
+  return <div className="source-page"><section className="grid top-grid single"><Card title={`Risk Register (${entries.length} exception${entries.length===1?'':'s'})`}>{!entries.length?<div className="empty-state large">No exceptions acknowledged yet. Acknowledge a Need Attention or Toxic Combination finding to add it here with an audit note.</div>:<div className="license-table"><table><thead><tr><th>Finding</th><th>Category</th><th>Note</th><th>Acknowledged</th><th></th></tr></thead><tbody>{entries.map(([key,ex])=><tr key={key}><td>{ex.title||key}</td><td>{ex.category||'—'}</td><td>{ex.note}</td><td>{new Date(ex.at).toLocaleString()}</td><td><button className="ack-chip" onClick={()=>unacknowledge(key)}>Undo</button></td></tr>)}</tbody></table></div>}<div className="disclaimer">{shared?'Shared across every admin pointed at this same collector - stored in the collector\'s database, not this browser, so everyone sees the same acknowledgments.':'Stored in this browser\'s local storage only - not shared across users. Connect the collector (see Data Sources) to make this register shared across every admin instead of per-browser.'}</div></Card></section></div>;
 }
 
 function DevicesDetailPage({data}){
-  const [q,setQ]=useFilter();const [status,setStatus]=useState('all');
+  const [q,setQ]=useFilter();const [status,setStatus]=useState('all');const [focus,setFocus]=useState(null);
   const devices=data.deviceList||[];
-  const filtered=devices.filter(d=>(status==='all'||(status==='compliant'?d.compliant===true:d.compliant===false))&&(!q||`${d.name} ${d.os}`.toLowerCase().includes(q.toLowerCase())));
+  // compliant is a tri-state from Graph: true, false, or null/undefined when the
+  // device has no reported compliance state at all (not Intune-managed, or the
+  // policy engine hasn't evaluated it yet) - that's a distinct "Unknown" bucket,
+  // not the same thing as "Non-compliant", and previously wasn't counted anywhere.
+  const compliantCount=devices.filter(d=>d.compliant===true).length;
+  const nonCompliantCount=devices.filter(d=>d.compliant===false).length;
+  const unknownCount=devices.filter(d=>d.compliant==null).length;
+  const filtered=devices.filter(d=>(status==='all'||(status==='compliant'?d.compliant===true:status==='non-compliant'?d.compliant===false:d.compliant==null))&&(!q||`${d.name} ${d.os}`.toLowerCase().includes(q.toLowerCase())));
+  const goInventory=nextStatus=>{setStatus(nextStatus);goTo(setFocus,'device-inventory');};
+  const sections=[
+    {id:'device-compliance',node:<section className="grid top-grid single"><Card title="Device Compliance">{!devices.length?<div className="empty-state">No devices returned, or Device.Read.All not granted.</div>:<div className="risk-body"><Donut segments={[{value:compliantCount,color:'#31b75a'},{value:nonCompliantCount,color:'#e85555'},{value:unknownCount,color:'#7f95a8'}]} total={devices.length} label="Devices"/><div className="risk-legend"><div><i className="green"/>Compliant<b>{fmt(compliantCount)} <small>{pct(compliantCount,devices.length)}</small></b></div><div><i className="red"/>Non-compliant<b>{fmt(nonCompliantCount)} <small>{pct(nonCompliantCount,devices.length)}</small></b></div><div><i className="grey"/>Unknown / not reported<b>{fmt(unknownCount)} <small>{pct(unknownCount,devices.length)}</small></b></div></div></div>}<div className="disclaimer">"Unknown" means Graph returned no compliance state for the device (isCompliant is null) - typically a device that isn't enrolled in Intune (or another MDM reporting to Entra) rather than one that failed a policy. It's excluded from the Compliant/Non-compliant KPI counts above so those two numbers only ever reflect a real evaluated state.</div></Card></section>},
+    {id:'device-inventory',node:<section className="grid top-grid single"><Card title="Device Inventory">{!devices.length?<div className="empty-state">No devices returned, or Device.Read.All not granted.</div>:<><FilterBar q={q} onQ={setQ} placeholder="Search name or OS…" count={filtered.length} total={devices.length} exportRows={filtered} exportColumns={[{label:'Device',value:'name'},{label:'OS',value:d=>`${d.os||''} ${d.osVersion||''}`.trim()},{label:'Trust Type',value:d=>d.trustType||''},{label:'Compliant',value:d=>d.compliant==null?'Unknown':d.compliant?'Yes':'No'},{label:'Last Sign-in',value:d=>d.lastSignIn?new Date(d.lastSignIn).toISOString():''}]} exportFilename="devices"><select className="filter-select" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">All compliance states</option><option value="compliant">Compliant</option><option value="non-compliant">Non-compliant</option><option value="unknown">Unknown / not reported</option></select></FilterBar><div className="license-table"><table><thead><tr><th>Device</th><th>OS</th><th>Trust Type</th><th>Compliant</th><th>Last Sign-in</th></tr></thead><tbody>{filtered.slice(0,300).map(d=><tr key={d.id}><td>{d.name}</td><td>{d.os} {d.osVersion}</td><td>{d.trustType||'—'}</td><td>{d.compliant==null?'Unknown':d.compliant?'Yes':'No'}</td><td>{d.lastSignIn?new Date(d.lastSignIn).toLocaleDateString():'—'}</td></tr>)}</tbody></table></div></>}</Card></section>},
+  ];
   return <div className="source-page">
-    <Kpis items={[['Total Devices',data.devices,'▱',()=>setStatus('all')],['Compliant',devices.filter(d=>d.compliant).length,'✓',()=>setStatus('compliant')],['Non-Compliant',devices.filter(d=>d.compliant===false).length,'⚠',()=>setStatus('non-compliant')]]}/>
-    <section className="grid top-grid single"><Card title="Device Inventory">{!devices.length?<div className="empty-state">No devices returned, or Device.Read.All not granted.</div>:<><FilterBar q={q} onQ={setQ} placeholder="Search name or OS…" count={filtered.length} total={devices.length} exportRows={filtered} exportColumns={[{label:'Device',value:'name'},{label:'OS',value:d=>`${d.os||''} ${d.osVersion||''}`.trim()},{label:'Trust Type',value:d=>d.trustType||''},{label:'Compliant',value:d=>d.compliant==null?'':d.compliant?'Yes':'No'},{label:'Last Sign-in',value:d=>d.lastSignIn?new Date(d.lastSignIn).toISOString():''}]} exportFilename="devices"><select className="filter-select" value={status} onChange={e=>setStatus(e.target.value)}><option value="all">All compliance states</option><option value="compliant">Compliant</option><option value="non-compliant">Non-compliant</option></select></FilterBar><div className="license-table"><table><thead><tr><th>Device</th><th>OS</th><th>Trust Type</th><th>Compliant</th><th>Last Sign-in</th></tr></thead><tbody>{filtered.slice(0,300).map(d=><tr key={d.id}><td>{d.name}</td><td>{d.os} {d.osVersion}</td><td>{d.trustType||'—'}</td><td>{d.compliant==null?'—':d.compliant?'Yes':'No'}</td><td>{d.lastSignIn?new Date(d.lastSignIn).toLocaleDateString():'—'}</td></tr>)}</tbody></table></div></>}</Card></section>
+    <Kpis items={[['Total Devices',data.devices,'▱',()=>goInventory('all')],['Compliant',compliantCount,'✓',()=>goInventory('compliant')],['Non-Compliant',nonCompliantCount,'⚠',()=>goInventory('non-compliant')],['Unknown',unknownCount,'◌',()=>goInventory('unknown')]]}/>
+    <SectionStack activeId={focus} sections={sections}/>
   </div>;
 }
 
@@ -262,20 +317,37 @@ function ConditionalAccessDetailPage({data,onSecurity}){
 }
 
 function GroupsDetailPage({data}){
-  const [q,setQ]=useFilter();const [sync,setSync]=useState('all');const [type,setType]=useState('all');
+  const [q,setQ]=useFilter();const [sync,setSync]=useState('all');const [type,setType]=useState('all');const [focus,setFocus]=useState(null);
   const groups=data.groupList||[];
+  // Each KPI/donut click sets BOTH filter dimensions explicitly (never just one) -
+  // otherwise a leftover value from a previous click (e.g. type still 'dynamic'
+  // after clicking Dynamic) silently combines with the next click's filter and
+  // produces an empty/wrong result until the stale dimension happens to get reset.
+  const goInventory=(nextSync,nextType)=>{setSync(nextSync);setType(nextType);goTo(setFocus,'group-inventory');};
   const filtered=groups.filter(g=>(sync==='all'||(sync==='cloud'?!g.onPremSynced:g.onPremSynced))&&(type==='all'||(type==='dynamic'?g.dynamic:g.type===type))&&(!q||g.name.toLowerCase().includes(q.toLowerCase())));
   if(!data.groupsAvailable)return <div className="source-page"><Kpis items={[['Total Groups',data.groups,'♧']]}/><div className="empty-state large">Group type/sync breakdown requires Group.Read.All to return the full group list, not just a count - permission may be missing, or the query failed. The Total Groups count above still comes from a separate live query.</div></div>;
-  return <div className="source-page">
-    <Kpis items={[['Total Groups',data.groups,'♧',()=>{setSync('all');setType('all');}],['Cloud-Only',data.cloudOnlyGroups,'☁',()=>setSync('cloud')],['On-Prem Synced',data.onPremSyncGroups,'⇄',()=>setSync('onprem')],['Dynamic (Smart) Groups',data.dynamicGroups,'◐',()=>setType('dynamic')]]}/>
-    <section className="grid top-grid single"><Card title="Group Inventory">
+  const typeColors={'Security':'#438ef1','Microsoft 365':'#31b75a','Mail-Enabled Security':'#f1a21a','Distribution':'#a678ec'};
+  const typeCounts=groups.reduce((m,g)=>{m[g.type]=(m[g.type]||0)+1;return m;},{});
+  const typeSegments=Object.entries(typeCounts).map(([name,value])=>({value,color:typeColors[name]||'#7f95a8'}));
+  const assignedGroups=Math.max(0,data.groups-data.dynamicGroups);
+  const sections=[
+    {id:'group-breakdown',node:<section className="grid top-grid">
+      <Card title="Group Type Breakdown">{!groups.length?<div className="empty-state">No groups returned.</div>:<div className="risk-body"><Donut segments={typeSegments} total={groups.length} label="Groups"/><div className="risk-legend">{Object.entries(typeCounts).map(([name,value])=><div key={name}><i style={{background:typeColors[name]||'#7f95a8'}}/>{name}<b>{fmt(value)} <small>{pct(value,groups.length)}</small></b></div>)}</div></div>}<div className="disclaimer">Type is derived from Graph's groupTypes/securityEnabled/mailEnabled fields, not a single flag - a "Microsoft 365" group is one where groupTypes includes Unified.</div></Card>
+      <Card title="Sync Source"><div className="risk-body"><Donut segments={[{value:data.cloudOnlyGroups,color:'#31b75a'},{value:data.onPremSyncGroups,color:'#438ef1'}]} total={data.groups} label="Groups"/><div className="risk-legend"><div><i className="green"/>Cloud-only<b>{fmt(data.cloudOnlyGroups)} <small>{pct(data.cloudOnlyGroups,data.groups)}</small></b></div><div><i className="blue"/>On-prem synced<b>{fmt(data.onPremSyncGroups)} <small>{pct(data.onPremSyncGroups,data.groups)}</small></b></div></div></div><button className="card-link" onClick={()=>goInventory('all','all')}>View the full group inventory →</button></Card>
+      <Card title="Membership Type"><div className="risk-body"><Donut segments={[{value:data.dynamicGroups,color:'#a678ec'},{value:assignedGroups,color:'#7f95a8'}]} total={data.groups} label="Groups"/><div className="risk-legend"><div><i className="purple"/>Dynamic<b>{fmt(data.dynamicGroups)} <small>{pct(data.dynamicGroups,data.groups)}</small></b></div><div><i className="grey"/>Assigned<b>{fmt(assignedGroups)} <small>{pct(assignedGroups,data.groups)}</small></b></div></div></div><div className="disclaimer">Dynamic membership groups are evaluated automatically by Entra from their membership rule; every other group has manually assigned members.</div></Card>
+    </section>},
+    {id:'group-inventory',node:<section className="grid top-grid single"><Card title="Group Inventory">
       <FilterBar q={q} onQ={setQ} placeholder="Search group name…" count={filtered.length} total={groups.length} exportRows={filtered} exportColumns={[{label:'Group',value:'name'},{label:'Type',value:'type'},{label:'Membership',value:g=>g.dynamic?'Dynamic':'Assigned'},{label:'Sync',value:g=>g.onPremSynced?'Synced from on-prem':'Cloud-only'},{label:'Membership Rule',value:g=>g.membershipRule||''}]} exportFilename="groups">
         <select className="filter-select" value={type} onChange={e=>setType(e.target.value)}><option value="all">All types</option><option value="Security">Security</option><option value="Microsoft 365">Microsoft 365</option><option value="Mail-Enabled Security">Mail-Enabled Security</option><option value="Distribution">Distribution</option><option value="dynamic">Dynamic membership only</option></select>
         <select className="filter-select" value={sync} onChange={e=>setSync(e.target.value)}><option value="all">All sync states</option><option value="cloud">Cloud-only</option><option value="onprem">Synced from on-prem</option></select>
       </FilterBar>
       <div className="license-table"><table><thead><tr><th>Group</th><th>Type</th><th>Membership</th><th>Sync</th></tr></thead><tbody>{filtered.slice(0,300).map(g=><tr key={g.id}><td>{g.name}</td><td>{g.type}</td><td>{g.dynamic?'Dynamic':'Assigned'}</td><td>{g.onPremSynced?'Synced from on-prem':'Cloud-only'}</td></tr>)}</tbody></table></div>
       <div className="disclaimer">Type is derived from Graph's groupTypes/securityEnabled/mailEnabled fields, not a single flag - a "Microsoft 365" group is one where groupTypes includes Unified. Dynamic membership groups are evaluated automatically by Entra from their membership rule; every other group here has manually assigned members. Source: /groups.</div>
-    </Card></section>
+    </Card></section>},
+  ];
+  return <div className="source-page">
+    <Kpis items={[['Total Groups',data.groups,'♧',()=>goInventory('all','all')],['Cloud-Only',data.cloudOnlyGroups,'☁',()=>goInventory('cloud','all')],['On-Prem Synced',data.onPremSyncGroups,'⇄',()=>goInventory('onprem','all')],['Dynamic (Smart) Groups',data.dynamicGroups,'◐',()=>goInventory('all','dynamic')]]}/>
+    <SectionStack activeId={focus} sections={sections}/>
   </div>;
 }
 
@@ -301,10 +373,9 @@ function CachedOverviewNotice({cache}){
   </>;
 }
 
-function EntraDashboard({data,onSecurity,onNavigate}){
-  const [exceptions,setExceptions]=useState(loadExceptions());
-  const acknowledge=key=>{const note=window.prompt('Note for this exception (why is it acceptable to exclude from Need Attention)?');if(note==null)return;const item=attention.find(a=>a.key===key);const next={...exceptions,[key]:{note,at:new Date().toISOString(),title:item?.title||key,category:'Need Attention'}};setExceptions(next);saveExceptions(next);};
-  const unacknowledge=key=>{const next={...exceptions};delete next[key];setExceptions(next);saveExceptions(next);};
+function EntraDashboard({data,onSecurity,onNavigate,collectorStatus}){
+  const {exceptions,acknowledge:ackEntry,unacknowledge}=useRiskRegister(data.organization?.id,collectorStatus);
+  const acknowledge=key=>{const note=window.prompt('Note for this exception (why is it acceptable to exclude from Need Attention)?');if(note==null)return;const item=attention.find(a=>a.key===key);ackEntry(key,{note,title:item?.title||key,category:'Need Attention'});};
   const attention=[
     {key:'toxic',level:'critical',title:'Toxic Combinations (Privileged + Risk Signal)',detail:'Privileged accounts that also lack MFA, are flagged risky by ID Protection, or are stale 90+ days',value:data.toxicCombinationsAvailable?data.toxicCombinationsCount:null,nav:'Toxic Combinations'},
     {key:'mfa',level:'warning',title:'Users Without MFA',detail:'No registered MFA method in the authentication registration report',value:data.mfa?.missing,nav:'Users'},
@@ -324,7 +395,7 @@ function EntraDashboard({data,onSecurity,onNavigate}){
   const go=label=>onNavigate&&onNavigate(label);
   return <>
     {!data.securityPermissionReady&&<div className="permission-banner"><div><strong>Security intelligence permissions are not fully validated.</strong><span>Core Entra data is live. Grant the read-only security scopes to enable risk, privileged-role and Conditional Access analytics.</span></div><button className="primary" onClick={onSecurity}>Grant security permissions</button></div>}
-    <section className="kpis">{[['Total Users',data.users,'users','♙','Users'],['Total Applications',data.applications,'apps','▦','Applications'],['Active Devices',data.devices,'devices','▱','Devices'],['Sign-ins (7D)',data.signIns7d,'signin','↪','Sign-ins'],['Risky Sign-ins (7D)',data.riskySignIns7d,'risk','♜','Sign-ins']].map(([title,value,type,glyph,target])=><button className={`kpi kpi-link ${type}`} key={title} onClick={()=>go(target)}><div className="kpi-icon">{glyph}</div><div><div className="kpi-title">{title}</div><div className="kpi-value">{fmt(value)}</div><div className="kpi-change"><span>View details →</span></div></div></button>)}</section>
+    <section className="kpis">{[['Total Users',data.users,'users','♙','Users'],['Total Groups',data.groups,'groups','♧','Groups'],['Total Applications',data.applications,'apps','▦','Applications'],['Active Devices',data.devices,'devices','▱','Devices'],['Sign-ins (7D)',data.signIns7d,'signin','↪','Sign-ins'],['Risky Sign-ins (7D)',data.riskySignIns7d,'risk','♜','Sign-ins']].map(([title,value,type,glyph,target])=><button className={`kpi kpi-link ${type}`} key={title} onClick={()=>go(target)}><div className="kpi-icon">{glyph}</div><div><div className="kpi-title">{title}</div><div className="kpi-value">{fmt(value)}</div><div className="kpi-change"><span>View details →</span></div></div></button>)}</section>
     <section className="grid top-grid">
       <Card title="Application Usage Overview" className="usage"><div className="usage-body"><Donut segments={appSegments} total={appTotal} label="Observed Apps"/><div className="legend">{[['Active (≤30 Days)',b.active30,'green'],['Inactive (31–90 Days)',b.inactive31to90,'amber'],['Inactive (91–180 Days)',b.inactive91to180,'orange'],['Inactive (>180 Days)',b.inactive180,'red']].map(([name,v,c])=><div key={name}><i className={c}/>{name}<b>{fmt(v)} <small>{pct(v,appTotal)}</small></b></div>)}</div></div><button className="card-link" onClick={()=>go('Applications')}>{data.appActivityAvailable?`All ${fmt(appTotal)} tenant applications, matched by appId to service-principal activity. View details →`:'Beta activity report unavailable - showing application inventory only.'}</button></Card>
       <Card title="Applications Not Used > 90 Days">{!data.appActivityAvailable?<div className="empty-state">{data.appActivityReason?`Unavailable: ${data.appActivityReason}`:'Service-principal activity report unavailable.'}</div>:<BarChart items={(data.inactiveApps||[]).slice(0,5).map(x=>({name:x.name,value:x.days==null?0:x.days}))}/>}<button className="card-link" onClick={()=>go('Applications')}>Top inactive applications by days since last observed activity. View details →</button></Card>
@@ -391,8 +462,101 @@ function AppConsentPage({data,loading,onGrant}){
   </div>;
 }
 
+// Every report reuses data already sitting in the current snapshot (live-Graph or
+// collector) - no extra permission requests, no extra Graph calls. IDs match the
+// collector's own REPORT_DEFINITIONS (collector/src/reports.js) 1:1 so an on-demand
+// CSV here and a scheduled/emailed CSV from the collector are the same report.
+function buildReportCatalog(data){
+  const staleCutoff=Date.now()-90*86400000;
+  return [
+    {id:'users-without-mfa',title:'Users Without MFA',available:data.mfa?.missing!=null,reason:'Permission required (AuditLog.Read.All / authentication methods report).',rows:data.mfa?.missingUsers||[],columns:[{label:'Name',value:'name'},{label:'User Principal Name',value:'upn'}]},
+    {id:'stale-users',title:'Stale Enabled Users (90+ Days)',available:data.userActivityAvailable,reason:'Permission required (User.Read.All).',rows:(data.userActivityList||[]).filter(u=>u.enabled!==false&&(!u.lastSignIn||new Date(u.lastSignIn).getTime()<staleCutoff)),columns:[{label:'Name',value:'name'},{label:'User Principal Name',value:'upn'},{label:'Last Sign-in',value:u=>u.lastSignIn?new Date(u.lastSignIn).toISOString():'Never observed'}]},
+    {id:'users-without-manager',title:'Users Without Manager',available:data.usersWithoutManager!=null,reason:'Permission required (User.Read.All).',rows:data.usersWithoutManagerList||[],columns:[{label:'Name',value:'name'},{label:'User Principal Name',value:'upn'}]},
+    {id:'groups',title:'Group Inventory',available:Boolean(data.groupsAvailable),reason:'Permission required (Group.Read.All).',rows:data.groupList||[],columns:[{label:'Group',value:'name'},{label:'Type',value:'type'},{label:'Membership',value:g=>g.dynamic?'Dynamic':'Assigned'},{label:'Sync',value:g=>g.onPremSynced?'Synced from on-prem':'Cloud-only'}]},
+    {id:'devices',title:'Device Inventory',available:(data.deviceList||[]).length>0,reason:'No devices returned, or Device.Read.All not granted.',rows:data.deviceList||[],columns:[{label:'Device',value:'name'},{label:'OS',value:d=>`${d.os||''} ${d.osVersion||''}`.trim()},{label:'Compliant',value:d=>d.compliant==null?'Unknown':d.compliant?'Yes':'No'},{label:'Last Sign-in',value:d=>d.lastSignIn?new Date(d.lastSignIn).toISOString():''}]},
+    {id:'application-inventory',title:'Application Inventory',available:(data.appDetails||[]).length>0,reason:'Service-principal activity report unavailable.',rows:data.appDetails||[],columns:[{label:'Application',value:'name'},{label:'Status',value:a=>a.bucket==='active'?'Active':`Inactive (${a.bucket}d)`},{label:'Days Since Activity',value:a=>a.days==null?'Never observed':a.days}]},
+    {id:'credential-expiry',title:'Application Credential Expiry',available:Boolean(data.credentialExpiry?.available),reason:'Permission required to read application credentials.',rows:data.credentialExpiry?.items||[],columns:[{label:'Application',value:'name'},{label:'Type',value:c=>c.type==='certificate'?'Certificate':'Client secret'},{label:'Expires',value:c=>new Date(c.expiresAt).toISOString()},{label:'Days Remaining',value:c=>c.daysRemaining<0?'Expired':c.daysRemaining}]},
+    {id:'toxic-combinations',title:'Toxic Combinations',available:Boolean(data.toxicCombinationsAvailable),reason:'Requires privileged-role data plus at least one risk signal (MFA, ID Protection, or staleness).',rows:data.toxicCombinations||[],columns:[{label:'User',value:'name'},{label:'Compounding Signals',value:c=>c.flags.join(', ')}]},
+    {id:'risky-users',title:'Risky Users',available:Boolean(data.riskyUsersAvailable),reason:data.riskyUsersReason||'Requires IdentityRiskyUser.Read.All (Entra ID P2).',rows:data.riskyUserList||[],columns:[{label:'User',value:'name'},{label:'Risk Level',value:'riskLevel'},{label:'Risk State',value:'riskState'}]},
+  ];
+}
+function ReportsPage({data,collectorStatus}){
+  const [expanded,setExpanded]=useState(null);
+  const [schedules,setSchedules]=useState(null);
+  const [scheduleForm,setScheduleForm]=useState({reportId:'users-without-mfa',frequency:'daily',recipients:''});
+  const [sendTo,setSendTo]=useState({});
+  const [toast,setToast]=useState('');
+  const tenantId=data.organization?.id;
+  const collectorReady=Boolean(collectorStatus?.connected&&tenantId);
+  const catalog=buildReportCatalog(data);
+  const notify=msg=>{setToast(msg);setTimeout(()=>setToast(''),4000);};
+  const loadSchedules=()=>{if(!collectorReady){setSchedules(null);return;}listReportSchedules(tenantId).then(r=>setSchedules(r.ok?r.data.schedules:[]));};
+  useEffect(()=>{loadSchedules();},[collectorReady,tenantId]);
+  const emailNow=async reportId=>{
+    const recipients=(sendTo[reportId]||'').trim();
+    if(!recipients)return notify('Enter a recipient email first.');
+    const r=await sendReportNow(tenantId,reportId,recipients);
+    notify(r.ok?`Sent to ${recipients}.`:`Failed: ${r.data?.error||r.reason}`);
+  };
+  const addSchedule=async()=>{
+    if(!scheduleForm.recipients.trim())return notify('Enter at least one recipient email.');
+    const r=await createReportSchedule(tenantId,scheduleForm.reportId,scheduleForm.frequency,scheduleForm.recipients);
+    if(r.ok){notify('Schedule created.');setScheduleForm({...scheduleForm,recipients:''});loadSchedules();}
+    else notify(`Failed: ${r.data?.error||r.reason}`);
+  };
+  const removeSchedule=async id=>{await deleteReportSchedule(tenantId,id);loadSchedules();};
+  return <div className="source-page">
+    <section className="grid top-grid single"><Card title="On-Demand Reports">
+      <div className="report-grid">{catalog.map(r=><div className="report-card" key={r.id}>
+        <div className="report-card-head"><strong>{r.title}</strong><span>{fmt(r.rows.length)} rows</span></div>
+        {!r.available?<div className="empty-state">{r.reason}</div>:<>
+          <div className="report-card-actions">
+            <button className="header-action" onClick={()=>setExpanded(expanded===r.id?null:r.id)}>{expanded===r.id?'Hide preview':'Preview'}</button>
+            <button className="header-action" onClick={()=>downloadCsv(r.id,r.rows,r.columns)} disabled={!r.rows.length}>⬇ CSV</button>
+            <button className="header-action" onClick={()=>window.print()} disabled={!r.rows.length}>⎙ Print/PDF</button>
+          </div>
+          {collectorReady&&<div className="report-email-row"><input className="filter-input" placeholder="email@company.com" value={sendTo[r.id]||''} onChange={e=>setSendTo({...sendTo,[r.id]:e.target.value})}/><button className="header-action" onClick={()=>emailNow(r.id)}>✉ Email now</button></div>}
+          {expanded===r.id&&(!r.rows.length?<div className="empty-state">No rows currently match this report.</div>:<div className="license-table"><table><thead><tr>{r.columns.map(c=><th key={c.label}>{c.label}</th>)}</tr></thead><tbody>{r.rows.slice(0,50).map((row,i)=><tr key={i}>{r.columns.map(c=><td key={c.label}>{typeof c.value==='function'?c.value(row):row[c.value]}</td>)}</tr>)}</tbody></table>{r.rows.length>50&&<div className="disclaimer">Showing the first 50 of {fmt(r.rows.length)} rows - export CSV for the full report.</div>}</div>)}
+        </>}
+      </div>)}</div>
+      <div className="disclaimer">Every report here is built from the same live snapshot already loaded for this dashboard session - no extra Graph permissions or queries. CSV export and Print/PDF work with no collector required; "Email now" and scheduling below need the collector.</div>
+    </Card></section>
+    <section className="grid top-grid single"><Card title="Scheduled Email Reports">
+      {!collectorStatus?.connected?<div className="empty-state large">Email delivery and scheduling run on the multi-tenant collector, with an "smtp" block configured in its <span className="mono">tenants.json</span>. {collectorStatus?.detail||'Collector not configured.'} See <span className="mono">collector/README.md</span> ("Email reports"), or open Data Sources to check collector status.</div>:!tenantId?<div className="empty-state">Waiting on tenant ID…</div>:<>
+        <div className="detail-toolbar"><div className="filter-bar">
+          <select className="filter-select" value={scheduleForm.reportId} onChange={e=>setScheduleForm({...scheduleForm,reportId:e.target.value})}>{catalog.map(r=><option key={r.id} value={r.id}>{r.title}</option>)}</select>
+          <select className="filter-select" value={scheduleForm.frequency} onChange={e=>setScheduleForm({...scheduleForm,frequency:e.target.value})}><option value="daily">Daily</option><option value="weekly">Weekly</option></select>
+          <input className="filter-input" placeholder="recipient1@company.com, recipient2@company.com" value={scheduleForm.recipients} onChange={e=>setScheduleForm({...scheduleForm,recipients:e.target.value})}/>
+          <button className="primary" onClick={addSchedule}>Add schedule</button>
+        </div></div>
+        {schedules==null?<div className="empty-state">Loading…</div>:!schedules.length?<div className="empty-state">No scheduled reports yet.</div>:<div className="license-table"><table><thead><tr><th>Report</th><th>Frequency</th><th>Recipients</th><th>Last sent</th><th></th></tr></thead><tbody>{schedules.map(s=><tr key={s.id}><td>{catalog.find(r=>r.id===s.reportId)?.title||s.reportId}</td><td>{s.frequency==='weekly'?'Weekly':'Daily'}</td><td>{s.recipients}</td><td>{s.lastSentAt?new Date(s.lastSentAt).toLocaleString():'Not sent yet'}</td><td><button className="ack-chip" onClick={()=>removeSchedule(s.id)}>Remove</button></td></tr>)}</tbody></table></div>}
+        <div className="disclaimer">Schedules run on the collector itself, not this browser tab - they keep firing whether or not the dashboard is open. Until an "smtp" block is configured in tenants.json, schedules save here but no email goes out.</div>
+      </>}
+    </Card></section>
+    {toast&&<div className="toast">{toast}</div>}
+  </div>;
+}
+
 function App(){
-  const [active,setActive]=useState('Overview');const [sourceId,setSourceId]=useState(getActiveSource());const [data,setData]=useState(window.__IAM_SNAPSHOT__||null);const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);
+  const demoMode=isDemoMode();
+  const localLoginMode=isLocalLoginMode();
+  // Demo and local login are both "there is no live source behind this" modes -
+  // they share every guard that would otherwise poll or refresh against a tenant
+  // that isn't actually there.
+  const offlineMode=demoMode||localLoginMode;
+  const [active,setActive]=useState('Overview');const [sourceId,setSourceId]=useState(getActiveSource());
+  const [data,setData]=useState(()=>{
+    if(window.__IAM_SNAPSHOT__)return window.__IAM_SNAPSHOT__;
+    // Stale-while-revalidate: hydrate from the last real snapshot this device saved
+    // (if any) instead of starting blank. loadDashboard() in authBoot.js already
+    // kicks off a real syncTenantData() in the background right after this renders,
+    // which replaces this stale data with fresh data the moment it resolves - this
+    // is purely about not showing an empty "Collecting live data..." screen for
+    // several/tens of seconds on a slow network or a large tenant.
+    const cached=getLocalSnapshot(sessionStorage.getItem('iam_tenant_id'));
+    return cached?{...cached.snapshot,dataSource:'stale-cache',cachedAt:cached.savedAt}:null;
+  });
+  const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);
   useEffect(()=>{const h=e=>{setData(e.detail);setLoading(false)};document.addEventListener('iam-live-data',h);return()=>document.removeEventListener('iam-live-data',h)},[]);
   useEffect(()=>{checkAdAgent().then(setAdStatus)},[]);
   useEffect(()=>{checkCollector().then(setCollectorStatus)},[]);
@@ -406,18 +570,29 @@ function App(){
   const dataSourceRef=useRef(data?.dataSource||null);
   useEffect(()=>{dataSourceRef.current=data?.dataSource||null;},[data]);
   useEffect(()=>{
-    if(sourceId!=='entra')return;
+    // Neither offline mode (demo or local login) polls - there's no live tenant
+    // behind either, and syncTenantData() would just fail against MSAL repeatedly
+    // (or worse, silently try real Graph calls) every refresh interval.
+    if(sourceId!=='entra'||offlineMode)return;
     let cancelled=false,timer=null;
     // Recursive setTimeout, not setInterval: the interval itself changes once the
     // collector confirms it's tracking this tenant (COLLECTOR_REFRESH_SECONDS,
     // typically 8s) vs. falling back to a direct Graph poll (REFRESH_SECONDS,
     // floor 30s) - this picks the current interval fresh on every tick instead of
-    // needing the effect to re-run whenever the data source changes.
-    const scheduleNext=()=>{if(cancelled)return;const seconds=dataSourceRef.current==='collector'?COLLECTOR_REFRESH_SECONDS:REFRESH_SECONDS;timer=setTimeout(tick,seconds*1000);};
+    // needing the effect to re-run whenever the data source changes. ±20% random
+    // jitter on top so many tabs opened around the same moment (a whole team
+    // checking the dashboard right after standup, say) don't stay permanently
+    // synchronized on the same tick schedule.
+    const jitter=seconds=>seconds*(0.8+Math.random()*0.4);
+    const scheduleNext=()=>{if(cancelled)return;const seconds=dataSourceRef.current==='collector'?COLLECTOR_REFRESH_SECONDS:REFRESH_SECONDS;timer=setTimeout(tick,jitter(seconds)*1000);};
     const tick=async()=>{
       if(!refreshingRef.current&&document.visibilityState==='visible'){
         refreshingRef.current=true;
-        try{const snap=await syncTenantData();setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
+        // allowDirectFallback:false - see liveTenantData.js: an automatic tick must
+        // never be the thing that turns a brief collector blip into every open tab
+        // hammering Graph directly at once. A failure here just means this tick
+        // keeps showing the last-known data and tries again next interval.
+        try{const snap=await syncTenantData({allowDirectFallback:false});setData(snap);}catch(e){console.error('IAM auto-refresh failed:',e);}
         finally{refreshingRef.current=false;}
       }
       scheduleNext();
@@ -425,7 +600,7 @@ function App(){
     scheduleNext();
     return()=>{cancelled=true;if(timer)clearTimeout(timer);};
   },[sourceId]);
-  const refresh=async()=>{setLoading(true);try{if(sourceId==='entra'){const snap=await syncTenantData();setData(snap);setToast(snap.dataSource==='collector'?'Refreshed from collector':'Entra data refreshed (live Graph)')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
+  const refresh=async()=>{if(demoMode){setData(buildDemoSnapshot());setToast('Demo data regenerated');setTimeout(()=>setToast(''),3000);return;}if(localLoginMode){setToast('Local login shows a fixed saved snapshot - exit local login to sign in and refresh live.');setTimeout(()=>setToast(''),4000);return;}setLoading(true);try{if(sourceId==='entra'){const snap=await syncTenantData();setData(snap);setToast(snap.dataSource==='collector'?'Refreshed from collector':'Entra data refreshed (live Graph)')}else if(sourceId==='ad'){const snap=await getAdSnapshot();setSourceData(snap);setToast('AD data refreshed')}else if(sourceId==='combined'){const snap=await getCombinedSnapshot();setCombinedData(snap);setToast('Combined data refreshed')}else setToast(`${sourceById(sourceId).name} is not configured`)}catch(e){setToast(e.message||'Refresh failed')}finally{setLoading(false);setTimeout(()=>setToast(''),3000)}};
   const chooseSource=id=>{setActiveSource(id);setSourceId(id);setActive('Overview');};
   const grantSecurity=async()=>{try{setToast('Requesting security permissions…');await connectSecurityScopes();setToast('Consent completed; refreshing security data…');await refresh()}catch(e){setToast(e.message||'Security consent failed')}setTimeout(()=>setToast(''),4000)};
   const grantLicense=async()=>{setLicenseLoading(true);try{setToast('Requesting license permissions…');await connectLicenseScopes();setToast('Consent completed; loading license data…');const d=await getLicenseSnapshot();setLicenseData(d);}catch(e){setToast(e.message||'License consent failed')}finally{setLicenseLoading(false);setTimeout(()=>setToast(''),4000)}};
@@ -446,12 +621,13 @@ function App(){
     else if(active==='Legacy Authentication')entraContent=<LegacyAuthenticationPage data={data}/>;
     else if(active==='Sign-ins')entraContent=<SignInsDetailPage data={data} trend={signInTrend} trendDays={signInTrendDays} trendLoading={signInTrendLoading} onRangeChange={loadSignInTrend}/>;
     else if(active==='Conditional Access')entraContent=<ConditionalAccessDetailPage data={data} onSecurity={grantSecurity}/>;
-    else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data}/>;
-    else if(active==='Risk Register')entraContent=<RiskRegisterPage/>;
+    else if(active==='Toxic Combinations')entraContent=<ToxicCombinationsPage data={data} collectorStatus={collectorStatus}/>;
+    else if(active==='Risk Register')entraContent=<RiskRegisterPage data={data} collectorStatus={collectorStatus}/>;
+    else if(active==='Reports')entraContent=<ReportsPage data={data} collectorStatus={collectorStatus}/>;
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
-    else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav}/>;
+    else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav} collectorStatus={collectorStatus}/>;
   }
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={signOut}><span>⇥</span>Sign out</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;return <React.Fragment key={g.section||'root'}>{g.section&&<div className="section-label">{g.section}</div>}{items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={demoMode?exitDemoMode:localLoginMode?exitLocalLoginMode:signOut}><span>⇥</span>{demoMode?'Exit demo':localLoginMode?'Exit local login':'Sign out'}</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{demoMode?'Demo data • no auto-refresh':localLoginMode?`Local login • saved ${data?.cachedAt?new Date(data.cachedAt).toLocaleString():'previously'} • no auto-refresh`:data?.dataSource==='stale-cache'?`Showing cached snapshot from ${data?.cachedAt?new Date(data.cachedAt).toLocaleTimeString():'earlier'} • refreshing…`:data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{demoMode&&<div className="permission-banner"><div><strong>Showing sample demo data.</strong><span>Not connected to Microsoft Entra - every number here is fabricated for preview/offline use, e.g. when the tenant or Entra itself is unreachable. Exit demo to sign in with a real account.</span></div><button className="primary" onClick={exitDemoMode}>Exit demo</button></div>}{localLoginMode&&<div className="permission-banner"><div><strong>Showing last saved snapshot{data?.cachedAt?` from ${new Date(data.cachedAt).toLocaleString()}`:''}.</strong><span>This is real data from the last successful sign-in on this device, not live - Microsoft sign-in is unavailable or not in use right now. Exit local login to try signing in again.</span></div><button className="primary" onClick={exitLocalLoginMode}>Exit local login</button></div>}{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);

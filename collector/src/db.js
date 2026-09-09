@@ -42,8 +42,86 @@ export function getDb() {
       observed_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_app_events_tenant_time ON app_events(tenant_id, activity_datetime);
+
+    CREATE TABLE IF NOT EXISTS report_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id TEXT NOT NULL,
+      report_id TEXT NOT NULL,
+      frequency TEXT NOT NULL,
+      recipients TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_sent_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_report_schedules_tenant ON report_schedules(tenant_id);
+
+    CREATE TABLE IF NOT EXISTS risk_register (
+      tenant_id TEXT NOT NULL,
+      entry_key TEXT NOT NULL,
+      title TEXT,
+      category TEXT,
+      note TEXT NOT NULL,
+      acknowledged_by TEXT,
+      acknowledged_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, entry_key)
+    );
   `);
   return db;
+}
+
+// --- Risk Register (Need Attention / Toxic Combination acknowledgments) --
+// Shared across every admin pointed at this collector - unlike the SPA's
+// standalone fallback (browser localStorage), this is one row per
+// (tenant, finding) that everyone reads and writes the same copy of.
+export function listRiskRegister(tenantId) {
+  return getDb().prepare(`
+    SELECT entry_key AS key, title, category, note, acknowledged_by AS acknowledgedBy, acknowledged_at AS at
+    FROM risk_register WHERE tenant_id = ? ORDER BY acknowledged_at DESC
+  `).all(tenantId);
+}
+export function upsertRiskRegisterEntry(tenantId, key, { title, category, note, acknowledgedBy, at }) {
+  getDb().prepare(`
+    INSERT INTO risk_register (tenant_id, entry_key, title, category, note, acknowledged_by, acknowledged_at)
+    VALUES (@tenant_id, @entry_key, @title, @category, @note, @acknowledged_by, @acknowledged_at)
+    ON CONFLICT(tenant_id, entry_key) DO UPDATE SET
+      title = excluded.title, category = excluded.category, note = excluded.note,
+      acknowledged_by = excluded.acknowledged_by, acknowledged_at = excluded.acknowledged_at
+  `).run({
+    tenant_id: tenantId, entry_key: key,
+    title: title ?? null, category: category ?? null, note,
+    acknowledged_by: acknowledgedBy ?? null, acknowledged_at: at || new Date().toISOString(),
+  });
+}
+export function deleteRiskRegisterEntry(tenantId, key) {
+  getDb().prepare(`DELETE FROM risk_register WHERE tenant_id = ? AND entry_key = ?`).run(tenantId, key);
+}
+
+// --- Scheduled email reports ---------------------------------------------
+// A schedule just says "email report X to these addresses every N days" - the
+// actual sending (and SMTP config) lives in mailer.js/reportScheduler.js; this
+// is only the persisted list of what's due and when it last went out.
+export function listReportSchedules(tenantId) {
+  return getDb().prepare(`
+    SELECT id, tenant_id AS tenantId, report_id AS reportId, frequency, recipients, created_at AS createdAt, last_sent_at AS lastSentAt
+    FROM report_schedules WHERE tenant_id = ? ORDER BY created_at DESC
+  `).all(tenantId);
+}
+export function listAllReportSchedules() {
+  return getDb().prepare(`
+    SELECT id, tenant_id AS tenantId, report_id AS reportId, frequency, recipients, created_at AS createdAt, last_sent_at AS lastSentAt
+    FROM report_schedules
+  `).all();
+}
+export function createReportSchedule(tenantId, reportId, frequency, recipients) {
+  const info = getDb().prepare(`
+    INSERT INTO report_schedules (tenant_id, report_id, frequency, recipients, created_at) VALUES (?, ?, ?, ?, ?)
+  `).run(tenantId, reportId, frequency, recipients, new Date().toISOString());
+  return info.lastInsertRowid;
+}
+export function deleteReportSchedule(id, tenantId) {
+  getDb().prepare(`DELETE FROM report_schedules WHERE id = ? AND tenant_id = ?`).run(id, tenantId);
+}
+export function markReportScheduleSent(id, when) {
+  getDb().prepare(`UPDATE report_schedules SET last_sent_at = ? WHERE id = ?`).run(when, id);
 }
 
 // Append-only: every poll adds a new row rather than overwriting the previous one,

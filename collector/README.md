@@ -115,6 +115,32 @@ Edit `tenants.json`:
 - `collectorToken` gates the local HTTP API. Set one before exposing this
   beyond `127.0.0.1` (e.g. behind a reverse proxy) — without it, `/health`,
   `/tenants`, `/tenants/:id/snapshot` and `/combined` are unauthenticated.
+  **Don't type this by hand** — a short/guessable value, or one that doesn't
+  *exactly* match `VITE_COLLECTOR_TOKEN` in the SPA's `.env` (a stray space, a
+  copy-paste that dropped a character), is the single most common setup
+  mistake here, and it fails silently: every collector request gets a plain
+  `401 Unauthorized`, which the dashboard just shows as "Collector
+  unavailable" — nothing points you at the token as the cause. Generate one
+  instead:
+
+  ```bash
+  node scripts/generate-token.js
+  ```
+
+  Run from `collector/`, after `tenants.json` already exists (copied from
+  `tenants.example.json` — see below): it writes a fresh random
+  `collectorToken` directly into `tenants.json` and prints the same value to
+  paste into `VITE_COLLECTOR_TOKEN`. Run it again any time to rotate the
+  token — anything still configured with the old value starts getting 401s
+  until updated.
+- `rateLimitPerSecond` (optional, default `50`) — the collector's HTTP API
+  rate-limits requests per client address, to protect the single Node
+  process from a stuck client retry loop rather than to constrain real
+  usage: 50/s per address is well above what even a large number of real
+  dashboard viewers produce (each tab polls once every several seconds), so
+  this should only ever trip on a bug or abuse. Raise it only if a
+  legitimate deployment puts many real users behind one shared egress IP
+  (a corporate proxy, for example) and they're tripping it in practice.
 
 ## 4. Run it
 
@@ -379,15 +405,117 @@ script). When the acting application has a display name it's included as
 expose a finer-grained "manual vs. Postman vs. internal tool" label than
 this; nothing here claims more precision than that.
 
+## Email reports
+
+The dashboard's Reports page can email a CSV report on demand or on a
+daily/weekly schedule — but only through the collector, because that's the
+one piece of this product with a long-running process and somewhere to keep
+outbound mail credentials. Without the collector, Reports still works for
+on-demand CSV export and Print/PDF (built client-side from whatever the
+browser already has loaded) — it just can't send email or run unattended.
+
+Add an `smtp` block to `tenants.json` to turn email on:
+
+```json
+{
+  "clientId": "...",
+  "certPath": "./certs/collector.pem",
+  "certKeyPath": "./certs/collector.key",
+  "collectorToken": "...",
+  "tenants": [ ... ],
+  "smtp": {
+    "host": "smtp.office365.com",
+    "port": 587,
+    "secure": false,
+    "user": "reports@yourcompany.com",
+    "pass": "<app password or SMTP credential>",
+    "from": "IAM Intelligence Reports <reports@yourcompany.com>"
+  }
+}
+```
+
+`host`/`port`/`user` are required for the collector to consider email
+configured (`GET /health` reports this as `emailConfigured: true/false`, and
+the Reports page reads that to show or hide email controls). `secure: true`
+uses implicit TLS (typically port 465); leave it `false` for STARTTLS on 587
+(Microsoft 365, most providers). `pass` is your mailbox's SMTP
+credential/app password, not your normal sign-in password if the provider
+supports app passwords (Microsoft 365 and Gmail both do, and require them
+when the mailbox has MFA enabled). Restart the collector after editing.
+
+Without this block, report *schedules* still save (they're just rows in
+`collector/data/history.sqlite`) but nothing is ever emailed — the collector
+logs this plainly on startup (`Email reports: no "smtp" block...`) rather
+than silently dropping scheduled sends.
+
+Two ways a report goes out:
+
+- **On demand** — the Reports page's "Email now" button on any available
+  report, or directly: `POST /tenants/:id/reports/:reportId/send` with a
+  JSON body `{"recipients": "a@company.com,b@company.com"}`.
+- **Scheduled** — daily or weekly, created from the Reports page or
+  directly: `POST /tenants/:id/report-schedules` with
+  `{"reportId": "...", "frequency": "daily", "recipients": "..."}`. The
+  collector checks every 15 minutes for schedules that are due and sends
+  through the same SMTP config; a schedule persists and keeps firing whether
+  or not the dashboard tab is open, since it runs inside the collector's own
+  process, not the browser. `GET /tenants/:id/report-schedules` lists them,
+  `DELETE /tenants/:id/report-schedules/:id` removes one.
+
+`GET /reports` lists every report id/label the collector knows how to build
+(the same catalog the Reports page shows); `GET
+/tenants/:id/reports/:reportId/csv` downloads one directly as a file. Every
+report is generated from the tenant's last collected snapshot
+(`collector/data/<tenantId>.json`), the same data `/tenants/:id/snapshot`
+already serves — nothing here makes an extra Graph call.
+
+## Shared Risk Register
+
+The SPA's Risk Register (acknowledged Need Attention / Toxic Combination
+findings, each with a required note) is shared across every admin when a
+collector is connected and tracking the tenant they're viewing — stored as
+one row per `(tenant, finding)` in the collector's own database, not
+per-browser `localStorage`. Two admins acknowledging the same finding see
+each other's acknowledgment and note; unacknowledging removes it for
+everyone, not just the browser that did it.
+
+No configuration needed — this activates automatically the moment
+`VITE_COLLECTOR_URL`/`VITE_COLLECTOR_TOKEN` point the dashboard at a
+collector that's tracking the signed-in tenant. Without a collector (or for
+a tenant the collector isn't tracking), it falls back to browser-local
+`localStorage` exactly as before — acknowledging still works, it just isn't
+shared until a collector is connected.
+
+Endpoints: `GET /tenants/:id/risk-register` lists entries; `PUT
+/tenants/:id/risk-register/:key` (body: `{note, title, category}`) creates
+or updates one (`note` is required — an acknowledgment always needs a
+reason); `DELETE /tenants/:id/risk-register/:key` removes one.
+
+## Serving many concurrent viewers
+
+`GET /tenants/:id/snapshot` and `/combined` are served from an in-memory
+cache of each tenant's last collected snapshot (both the parsed object and
+its already-serialized JSON string), populated the moment a collection
+cycle finishes — not re-read and re-parsed from disk on every request.
+That matters because every open dashboard tab polls this endpoint every
+`VITE_COLLECTOR_REFRESH_INTERVAL_SECONDS` (default 8s) independently: at
+100+ concurrent viewers on a large tenant (uncapped user/group/device/
+application lists can run tens of megabytes), re-parsing that JSON
+synchronously on every single request would block this single-process
+server's one event-loop thread badly enough to make it the actual
+bottleneck. See `RUNBOOK.md` §9 for the measured before/after numbers and
+the related fix to how the dashboard falls back when the collector briefly
+blips (it no longer stampedes every open tab to direct Graph at once).
+
 ## What this version does and doesn't do
 
 Implemented: users/applications/groups/devices/sign-in counts, risky users,
 privileged-role assignments, Conditional Access policy count, stale-user
 count, MFA registration gap, license SKU inventory + stale-licensed-account
-count, application credential (secret/certificate) expiry, append-only
-historical trend/delta, and new-application actor tracking.
+count, application credential (secret/certificate) expiry (including expired
+counts split by secret vs. certificate), append-only historical trend/delta,
+new-application actor tracking, on-demand/scheduled email reports (requires
+the `smtp` block), and a shared multi-admin Risk Register (see above).
 
-Not yet implemented: sign-in trend/recent-activity history (only the point
-counts are stored, not the full sign-in log), and a shared/multi-user Risk
-Register (the SPA's exception register is still browser-local `localStorage`
-— extending it into this database is a natural next step, not yet done).
+Not yet implemented: sign-in trend/recent-activity history — only the point
+counts are stored, not the full sign-in log.
