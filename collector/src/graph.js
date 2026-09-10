@@ -1,4 +1,4 @@
-import { getAppToken } from './msal.js';
+import { getAppToken, getAzureManagementToken } from './msal.js';
 
 const GRAPH_BASE = 'https://graph.microsoft.com';
 
@@ -166,6 +166,75 @@ function topCounts(records, field, limit = 8) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([name, value]) => ({ name, value }));
 }
 
+// Azure Resource Manager is a completely separate API/resource from Microsoft Graph
+// (management.azure.com, not graph.microsoft.com/the GRAPH_BASE at the top of this
+// file) - deliberately its own tiny fetch layer rather than reusing graphGet, same as
+// the browser-side delegated equivalent in src/entraAuth.js.
+async function armGet(token, path, version = '2022-12-01') {
+  const url = path.startsWith('https://') ? path : `https://management.azure.com${path}${path.includes('?') ? '&' : '?'}api-version=${version}`;
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+  if (!response.ok) {
+    const body = await response.text();
+    const error = new Error(`Azure Resource Manager ${response.status} on ${path}: ${body}`);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+async function armGetOptional(token, path, version) {
+  try {
+    return { ok: true, data: await armGet(token, path, version) };
+  } catch (error) {
+    console.warn(`[collector] ${error.message}`);
+    return { ok: false, error };
+  }
+}
+// Fixed, documented GUIDs - identical across every Azure AD tenant for these four
+// built-in roles. See the identical comment/list in src/entraAuth.js.
+const BUILTIN_ROLE_NAMES = {
+  '8e3af657-a8ff-443c-a75c-2fe8c4bcb635': 'Owner',
+  'b24988ac-6180-42a0-ab88-20f7382dd24c': 'Contributor',
+  'acdd72a7-3385-48ef-bd42-f606fba81ae7': 'Reader',
+  '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9': 'User Access Administrator',
+};
+function armRoleName(roleDefinitionId) {
+  const guid = (roleDefinitionId || '').split('/').pop();
+  return BUILTIN_ROLE_NAMES[guid] || `Custom role (${guid || 'unknown'})`;
+}
+// Subscriptions + who has standing RBAC access to each, at subscription scope only
+// ($filter=atScope()). Runs entirely on its own app-only ARM token - independent of
+// the Graph token/data the rest of collectTenant() gathers, so it's kicked off
+// concurrently with everything else and only awaited once its result is actually
+// needed (see collectTenant()). Never throws: a tenant where the collector's service
+// principal has no Azure RBAC role assigned yet (the common case before an admin
+// grants it) just comes back {available:false, reason}, same as any other
+// optional/permission-gated field elsewhere in this snapshot.
+async function collectAzureSubscriptions(tenant, config) {
+  try {
+    const azureToken = await getAzureManagementToken(tenant, config);
+    const subsResult = await armGetOptional(azureToken, '/subscriptions', '2022-12-01');
+    if (!subsResult.ok) return { available: false, reason: String(subsResult.error?.message || ''), subscriptions: [], rawAssignments: [] };
+    const subscriptions = (subsResult.data.value || []).map((s) => ({ id: s.subscriptionId, name: s.displayName, state: s.state }));
+    const perSub = await Promise.all(subscriptions.map((s) => armGetOptional(azureToken, `/subscriptions/${s.id}/providers/Microsoft.Authorization/roleAssignments?$filter=atScope()`, '2022-04-01')));
+    const rawAssignments = [];
+    perSub.forEach((result, i) => {
+      if (!result.ok) return;
+      const sub = subscriptions[i];
+      for (const ra of result.data.value || []) {
+        rawAssignments.push({
+          subscriptionId: sub.id, subscriptionName: sub.name,
+          principalId: ra.properties?.principalId || null,
+          principalType: ra.properties?.principalType || 'Unknown',
+          role: armRoleName(ra.properties?.roleDefinitionId),
+        });
+      }
+    });
+    return { available: true, reason: null, subscriptions, rawAssignments };
+  } catch (error) {
+    return { available: false, reason: String(error.message || error), subscriptions: [], rawAssignments: [] };
+  }
+}
+
 // Application-permission collection for one tenant. Returns the same field shape as
 // src/entraAuth.js getTenantSnapshot() (the delegated live-view snapshot) for every
 // field the dashboard actually renders, so the browser can use whichever one it gets
@@ -176,6 +245,10 @@ function topCounts(records, field, limit = 8) {
 export async function collectTenant(tenant, config) {
   const collectedAt = new Date().toISOString();
   const token = await getAppToken(tenant, config);
+  // Kicked off now, awaited later (once nameById exists, for principal-name
+  // resolution) - runs concurrently with every Graph call below since it's on its
+  // own ARM token and shares no data with them.
+  const azureSubscriptionsPromise = collectAzureSubscriptions(tenant, config);
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
   const staleCutoff = Date.now() - 90 * 86400000;
   const now = Date.now();
@@ -361,6 +434,15 @@ export async function collectTenant(tenant, config) {
   if (userActivityAvailable) for (const u of users) if (!nameById.has(u.id)) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (registrationAvailable) for (const u of registrationList) if (!nameById.has(u.id)) nameById.set(u.id, u.userDisplayName || u.userPrincipalName);
   for (const sp of servicePrincipalRecords) if (!nameById.has(sp.id)) nameById.set(sp.id, sp.displayName || sp.appId || sp.id);
+  const azureRaw = await azureSubscriptionsPromise;
+  const azureSubscriptions = {
+    available: azureRaw.available,
+    reason: azureRaw.reason,
+    subscriptions: azureRaw.subscriptions,
+    totalSubscriptions: azureRaw.available ? azureRaw.subscriptions.length : null,
+    roleAssignments: azureRaw.available ? azureRaw.rawAssignments.map((ra) => ({ ...ra, principalName: nameById.get(ra.principalId) || ra.principalId })) : [],
+    collectedAt,
+  };
   const privilegedAccess = { available: roleAssignments.ok && roleEligibility.ok, activeCount: privilegedUsers, eligibleCount: roleEligibility.ok ? eligiblePrincipalIds.size : null, eligibleNotActive: eligibleNotActiveIds.map((id) => ({ id, name: nameById.get(id) || id })), activeNotEligible: activeNotEligibleIds.map((id) => ({ id, name: nameById.get(id) || id })), activeList: roleAssignments.ok ? [...privilegedPrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [], eligibleList: roleEligibility.ok ? [...eligiblePrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [] };
   const mfaMissingIds = new Set(mfaMissingUsers.map((u) => u.id));
   const riskyUserRecords = riskyUsers.ok ? riskyUsers.data.value || [] : [];
@@ -460,6 +542,7 @@ export async function collectTenant(tenant, config) {
     },
     onboarding,
     usageAnalytics,
+    azureSubscriptions,
     deviceList: deviceList.ok ? (deviceList.data.value || []).map((d) => ({ id: d.id, name: d.displayName, os: d.operatingSystem, osVersion: d.operatingSystemVersion, trustType: d.trustType, compliant: d.isCompliant, enabled: d.accountEnabled, lastSignIn: d.approximateLastSignInDateTime })) : [],
     healthScore,
     healthContributors: scoreContributors,
