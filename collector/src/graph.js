@@ -2,24 +2,39 @@ import { getAppToken, getAzureManagementToken } from './msal.js';
 
 const GRAPH_BASE = 'https://graph.microsoft.com';
 
+// Bounded retry on throttling only (429, and 503 which Graph also uses for transient
+// overload), honoring the Retry-After header Graph sends - the browser-side fetcher in
+// src/entraAuth.js has always had this; this one didn't, which meant a single burst of
+// throttling here failed a field outright instead of recovering within the same cycle.
+// Confirmed as the actual cause of a real "Legacy Authentication: Unavailable (429)"
+// report - the new full-7-day sign-in log fetch added for usage analytics (below) hits
+// the same /auditLogs/signIns endpoint in the same burst as the legacy-auth queries,
+// which was enough to occasionally trip this tenant's rate limit.
+const GRAPH_MAX_RETRIES = 2;
 async function graphGet(token, path, version = 'v1.0') {
   const url = path.startsWith('https://') ? path : `${GRAPH_BASE}/${version}${path}`;
-  const response = await fetch(url, {
-    // A browser always sends an Accept-Language header on every request; Node's
-    // fetch sends none at all. That's invisible almost everywhere, but the PIM
-    // endpoints (roleEligibilityScheduleInstances) throw a 400
-    // CultureNotFoundException ("* is an invalid culture identifier") server-side
-    // when it's absent - confirmed as a known Graph PIM quirk, not specific to
-    // this tenant. Harmless to send everywhere else, so it's not conditional.
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual', 'Accept-Language': 'en-US' },
-  });
-  if (!response.ok) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url, {
+      // A browser always sends an Accept-Language header on every request; Node's
+      // fetch sends none at all. That's invisible almost everywhere, but the PIM
+      // endpoints (roleEligibilityScheduleInstances) throw a 400
+      // CultureNotFoundException ("* is an invalid culture identifier") server-side
+      // when it's absent - confirmed as a known Graph PIM quirk, not specific to
+      // this tenant. Harmless to send everywhere else, so it's not conditional.
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual', 'Accept-Language': 'en-US' },
+    });
+    if (response.ok) return response.json();
+    if ((response.status === 429 || response.status === 503) && attempt < GRAPH_MAX_RETRIES) {
+      const retryAfter = Number(response.headers.get('retry-after'));
+      const waitMs = Math.min(30000, Math.max(500, (Number.isFinite(retryAfter) ? retryAfter : 2 ** attempt) * 1000));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      continue;
+    }
     const body = await response.text();
     const error = new Error(`Microsoft Graph ${response.status} on ${path}: ${body}`);
     error.status = response.status;
     throw error;
   }
-  return response.json();
 }
 
 async function graphGetOptional(token, path, version) {
