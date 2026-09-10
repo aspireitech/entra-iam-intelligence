@@ -130,6 +130,12 @@ export function buildDemoSnapshot(){
     appActivity:apps.appActivity,appPopulation:apps.total,inactiveApps:apps.inactiveApps,appDetails:apps.appDetails,
     appActivityAvailable:true,appActivityReason:null,
     recentSignIns,signInTrend,signInsAvailable:true,signInsReason:null,failedSignIns7d:31,
+    usageAnalytics:{
+      available:true,reason:null,windowDays:7,totalSignIns:1840,truncated:false,
+      apps:[{name:'Microsoft 365',value:612},{name:'Salesforce',value:388},{name:'Internal Portal',value:301},{name:'GitHub Enterprise',value:244},{name:'Zoom',value:180},{name:'Slack',value:115}],
+      resources:[{name:'Microsoft Graph',value:940},{name:'Office 365 Exchange Online',value:520},{name:'SharePoint Online',value:210},{name:'Azure Storage',value:98},{name:'Windows Azure Service Management API',value:72}],
+      users:range(6).map(i=>({name:personName(i),value:120-i*14})),
+    },
     mfa:{registered:users.total-users.mfaMissingCount,missing:users.mfaMissingCount,observed:users.total,missingUsers:users.mfaMissingUsers},
     staleUsers:users.staleCount,staleUserList:users.staleUserList,
     userActivityAvailable:true,userActivityList:users.list,

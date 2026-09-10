@@ -228,6 +228,15 @@ function DevicesDetailPage({data}){
   </div>;
 }
 
+function UsageAnalyticsSection({usage}){
+  const u=usage||{};
+  if(!u.available)return <section className="grid top-grid single"><Card title="Application, API & User Usage (7D)"><div className="empty-state">{u.reason?`Unavailable: ${u.reason}`:'Sign-in log data is unavailable for this tenant.'}</div></Card></section>;
+  return <section className="grid top-grid">
+    <Card title="Top Applications (Client) by Sign-ins"><BarChart items={u.apps||[]}/><div className="disclaimer">Which application is generating the most sign-in traffic tenant-wide, over the last {u.windowDays}D ({fmt(u.totalSignIns)} sign-ins sampled{u.truncated?', truncated at the collector\'s page cap':''}).</div></Card>
+    <Card title="Top APIs / Resources Accessed"><BarChart items={u.resources||[]}/><div className="disclaimer">Which downstream API/resource (Microsoft Graph, Exchange Online, SharePoint, etc.) each sign-in was actually authenticating against.</div></Card>
+    <Card title="Top Users by Sign-in Volume"><BarChart items={u.users||[]}/><div className="disclaimer">Which accounts contribute the most sign-in volume - a sudden riser here (especially a service account) is worth a second look.</div></Card>
+  </section>;
+}
 function SignInsDetailPage({data,trend,trendDays,trendLoading,onRangeChange}){
   const [q,setQ]=useFilter();
   const signIns=data.recentSignIns||[];
@@ -236,6 +245,7 @@ function SignInsDetailPage({data,trend,trendDays,trendLoading,onRangeChange}){
   return <div className="source-page">
     <section className="detail-toolbar"><span className="filter-count">Sign-in trend range</span><div className="filter-bar">{[7,30,90].map(d=><button key={d} className={`source-tab ${trendDays===d?'active':''}`} onClick={()=>onRangeChange(d)}>{d}D</button>)}</div></section>
     <section className="grid top-grid single"><Card title={`Sign-in Trend (${trendDays}D)`}>{trendLoading?<div className="empty-state">Loading…</div>:<><div className="chart-head"><span>{fmt(Math.max(...(trend||[]).map(x=>x.total||0),0))}</span><span>Peak daily count</span></div><Sparkline points={trend||[]}/></>}</Card></section>
+    <UsageAnalyticsSection usage={data.usageAnalytics}/>
     <section className="grid top-grid single"><Card title="Recent Sign-ins"><FilterBar q={q} onQ={setQ} placeholder="Search user or application…" count={filtered.length} total={signIns.length} exportRows={filtered} exportColumns={[{label:'Time',value:s=>new Date(s.createdDateTime).toISOString()},{label:'User',value:s=>s.userDisplayName||s.userPrincipalName||'Service principal'},{label:'Application',value:s=>s.appDisplayName||''},{label:'Status',value:s=>s.status?.errorCode===0?'Success':`Failed (${s.status?.errorCode})`},{label:'Risk',value:s=>s.riskLevelAggregated||'none'}]} exportFilename="sign-ins"/><div className="license-table"><table><thead><tr><th>Time</th><th>User</th><th>Application</th><th>Status</th><th>Risk</th></tr></thead><tbody>{filtered.slice(0,50).map((s,i)=>{const ok=s.status?.errorCode===0;return <tr key={s.id||i}><td>{new Date(s.createdDateTime).toLocaleString()}</td><td>{s.userDisplayName||s.userPrincipalName||'Service principal'}</td><td>{s.appDisplayName||'—'}</td><td className={ok?'':'text-critical'}>{ok?'Success':`Failed (${s.status?.errorCode})`}</td><td>{s.riskLevelAggregated||'none'}</td></tr>})}</tbody></table></div></Card></section>
   </div>;
 }
