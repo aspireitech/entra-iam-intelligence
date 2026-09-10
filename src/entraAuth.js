@@ -11,6 +11,16 @@ export const LICENSE_SCOPES=['Organization.Read.All'];
 // Application permission grants (appRoleAssignedTo) and PIM eligibility both reuse
 // CORE_SCOPES/SECURITY_SCOPES already granted - no new consent needed for those.
 export const GOVERNANCE_SCOPES=['DelegatedPermissionGrant.Read.All'];
+// Azure Resource Manager is a completely different API/resource from Microsoft Graph
+// (management.azure.com, not graph.microsoft.com) - none of the scopes above grant
+// anything here. This scope alone must never be mixed into the same token request as
+// a Graph scope (Azure AD v2 tokens are single-resource); it always gets its own
+// acquireToken call. Consenting to this scope is also not sufficient on its own - the
+// signed-in user (or, for the collector, its service principal) additionally needs an
+// Azure RBAC role (at least Reader) assigned on the subscription/management group in
+// Azure Portal -> Subscriptions -> Access control (IAM). Being a Global Administrator
+// in Entra ID does NOT grant that automatically; it's a separate authorization system.
+export const AZURE_SCOPES=['https://management.azure.com/user_impersonation'];
 export const GRAPH_SCOPES=CORE_SCOPES;
 let msalInstance;let initPromise;let redirectResult;
 function getMsal(){if(!AUTH_CONFIGURED)return null;if(!msalInstance)msalInstance=new PublicClientApplication({auth:{clientId,authority,redirectUri:window.location.origin,postLogoutRedirectUri:window.location.origin},cache:{cacheLocation:'sessionStorage',storeAuthStateInCookie:false}});if(!initPromise)initPromise=msalInstance.initialize();return msalInstance;}
@@ -21,6 +31,7 @@ export async function connectTenant(){const result=await acquireToken(CORE_SCOPE
 export async function connectSecurityScopes(){const result=await acquireToken(SECURITY_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
 export async function connectLicenseScopes(){const result=await acquireToken(LICENSE_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
 export async function connectGovernanceScopes(){const result=await acquireToken(GOVERNANCE_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
+export async function connectAzureScopes(){const result=await acquireToken(AZURE_SCOPES,true);return result?{account:result.account,accessToken:result.accessToken,scopes:result.scopes}:null;}
 export async function getGraphToken(scopes=CORE_SCOPES,allowRedirect=true){const result=await acquireToken(scopes,allowRedirect);return result?.accessToken||null;}
 // Bounded retry on throttling only (429, and 503 which Graph also uses for transient
 // overload) - honoring the Retry-After header Graph sends is what keeps one busy
@@ -280,6 +291,55 @@ export async function getAppConsentSnapshot(){
    delegatedGrants,
    delegatedGrantsHighRiskCount:delegatedGrants.filter(d=>d.highRisk).length,
  };
+}
+// Azure subscriptions + who has standing RBAC access to each - the Azure-Resource-
+// Manager counterpart to the Privileged Access page's Entra directory-role view.
+// Separate base URL/token audience from every graphGet* helper above, so this gets
+// its own tiny fetch layer rather than reusing graphGet.
+async function armGet(path,version='2022-12-01'){
+ const token=(await acquireToken(AZURE_SCOPES,false))?.accessToken;
+ if(!token)throw new Error('Azure management authentication redirect in progress, or Azure permissions not yet granted.');
+ const url=path.startsWith('https://')?path:`https://management.azure.com${path}${path.includes('?')?'&':'?'}api-version=${version}`;
+ const response=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:'application/json'}});
+ if(!response.ok){const body=await response.text();const error=new Error(`Azure Resource Manager ${response.status} on ${path}: ${body}`);error.status=response.status;throw error;}
+ return response.json();
+}
+async function armGetOptional(path,version){try{return{ok:true,data:await armGet(path,version)};}catch(error){return{ok:false,error};}}
+// Fixed, documented GUIDs - identical across every Azure AD tenant on the planet for
+// these four built-in roles, so no extra roleDefinitions lookup is needed for the
+// common case. Anything else (a custom role, or a built-in role outside this short
+// list) still shows correctly, just without a friendly name.
+const BUILTIN_ROLE_NAMES={
+ '8e3af657-a8ff-443c-a75c-2fe8c4bcb635':'Owner',
+ 'b24988ac-6180-42a0-ab88-20f7382dd24c':'Contributor',
+ 'acdd72a7-3385-48ef-bd42-f606fba81ae7':'Reader',
+ '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9':'User Access Administrator',
+};
+function armRoleName(roleDefinitionId){const guid=(roleDefinitionId||'').split('/').pop();return BUILTIN_ROLE_NAMES[guid]||`Custom role (${guid||'unknown'})`;}
+export async function getAzureSubscriptionsSnapshot(){
+ const collectedAt=new Date().toISOString();
+ const subsResult=await armGetOptional('/subscriptions','2022-12-01');
+ if(!subsResult.ok)return {available:false,reason:String(subsResult.error?.message||''),subscriptions:[],roleAssignments:[],totalSubscriptions:null,collectedAt};
+ const subscriptions=(subsResult.data.value||[]).map(s=>({id:s.subscriptionId,name:s.displayName,state:s.state}));
+ // Role assignments AT the subscription scope only ($filter=atScope()) - not
+ // inherited from a management group above, not resource-group-level below. That's
+ // deliberately the same "standing access at this scope" question Privileged Access
+ // already asks for Entra directory roles.
+ const perSub=await Promise.all(subscriptions.map((s)=>armGetOptional(`/subscriptions/${s.id}/providers/Microsoft.Authorization/roleAssignments?$filter=atScope()`,'2022-04-01')));
+ const roleAssignments=[];
+ perSub.forEach((result,i)=>{
+   if(!result.ok)return;
+   const sub=subscriptions[i];
+   for(const ra of result.data.value||[]){
+     roleAssignments.push({
+       subscriptionId:sub.id,subscriptionName:sub.name,
+       principalId:ra.properties?.principalId||null,
+       principalType:ra.properties?.principalType||'Unknown',
+       role:armRoleName(ra.properties?.roleDefinitionId),
+     });
+   }
+ });
+ return {available:true,reason:null,subscriptions,roleAssignments,totalSubscriptions:subscriptions.length,collectedAt};
 }
 export async function getSignInTrend(days=30){return dailySignIns(days);}
 export async function signOut(){const instance=getMsal();if(!instance)return;await initPromise;sessionStorage.removeItem('iam_tenant_connected');sessionStorage.removeItem('iam_tenant_id');sessionStorage.removeItem('iam_connect_pending');await instance.logoutRedirect({postLogoutRedirectUri:window.location.origin});}
