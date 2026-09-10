@@ -47,3 +47,18 @@ export async function getAppToken(tenant, config) {
   if (!result?.accessToken) throw new Error(`No app-only token returned for tenant ${tenant.id}`);
   return result.accessToken;
 }
+
+// Same cert credential, same app registration, same tenant - just a different resource
+// (Azure Resource Manager, not Graph). MSAL caches tokens per-scope internally within one
+// ConfidentialClientApplication instance, so reusing getMsalClient's cache here is safe -
+// this never collides with the Graph token above. Whether this actually succeeds depends
+// entirely on Azure RBAC (a role like Reader assigned to this app's service principal on
+// a subscription/management group in Azure Portal -> Access control (IAM)) - unlike Graph,
+// there is no "API permissions" grant for this at all; a token is always issued, Azure
+// Resource Manager just authorizes (or 403s) each call based on RBAC alone.
+export async function getAzureManagementToken(tenant, config) {
+  const app = getMsalClient(tenant, config);
+  const result = await app.acquireTokenByClientCredential({ scopes: ['https://management.azure.com/.default'] });
+  if (!result?.accessToken) throw new Error(`No Azure management token returned for tenant ${tenant.id}`);
+  return result.accessToken;
+}

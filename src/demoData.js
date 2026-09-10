@@ -136,6 +136,18 @@ export function buildDemoSnapshot(){
       resources:[{name:'Microsoft Graph',value:940},{name:'Office 365 Exchange Online',value:520},{name:'SharePoint Online',value:210},{name:'Azure Storage',value:98},{name:'Windows Azure Service Management API',value:72}],
       users:range(6).map(i=>({name:personName(i),value:120-i*14})),
     },
+    azureSubscriptions:{
+      available:true,reason:null,collectedAt:new Date().toISOString(),
+      subscriptions:[{id:'demo-sub-1',name:'Contoso Production',state:'Enabled'},{id:'demo-sub-2',name:'Contoso Sandbox',state:'Enabled'}],
+      totalSubscriptions:2,
+      roleAssignments:[
+        {subscriptionId:'demo-sub-1',subscriptionName:'Contoso Production',principalId:'demo-user-0',principalName:personName(0),principalType:'User',role:'Owner'},
+        {subscriptionId:'demo-sub-1',subscriptionName:'Contoso Production',principalId:'demo-sp-1',principalName:'Legacy Deployment Automation',principalType:'ServicePrincipal',role:'Contributor'},
+        {subscriptionId:'demo-sub-1',subscriptionName:'Contoso Production',principalId:'demo-user-20',principalName:personName(20),principalType:'User',role:'Reader'},
+        {subscriptionId:'demo-sub-2',subscriptionName:'Contoso Sandbox',principalId:'demo-user-40',principalName:personName(40),principalType:'User',role:'User Access Administrator'},
+        {subscriptionId:'demo-sub-2',subscriptionName:'Contoso Sandbox',principalId:'demo-sp-2',principalName:'Nightly Backup Service',principalType:'ServicePrincipal',role:'Reader'},
+      ],
+    },
     mfa:{registered:users.total-users.mfaMissingCount,missing:users.mfaMissingCount,observed:users.total,missingUsers:users.mfaMissingUsers},
     staleUsers:users.staleCount,staleUserList:users.staleUserList,
     userActivityAvailable:true,userActivityList:users.list,
