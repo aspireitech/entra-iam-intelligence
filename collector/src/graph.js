@@ -132,6 +132,27 @@ function bucketAppActivity(ownApps, activityRecords) {
   return { buckets, inactiveApps: inactiveApps.slice(0, 25), all };
 }
 
+// Counts how many records in a list were created within each of four trailing
+// windows, from a single date field - used for the "recent onboarding" chart across
+// users/guests/devices/groups/applications. Deliberately cumulative (last7d includes
+// what's in last24h, etc.) rather than disjoint buckets: "onboarded in the last 7
+// days" is the question people actually ask, not "onboarded on exactly day 5-7".
+// Missing/unparseable dates are skipped rather than counted, since Graph can return
+// null for a field like registrationDateTime on an older device record.
+function onboardingBuckets(records, dateField) {
+  const now = Date.now();
+  const windows = { last24h: now - 86400000, last7d: now - 7 * 86400000, last30d: now - 30 * 86400000, last6mo: now - 182 * 86400000 };
+  const counts = { last24h: 0, last7d: 0, last30d: 0, last6mo: 0 };
+  for (const record of records) {
+    const raw = record[dateField];
+    if (!raw) continue;
+    const t = new Date(raw).getTime();
+    if (Number.isNaN(t)) continue;
+    for (const key of Object.keys(windows)) if (t >= windows[key]) counts[key]++;
+  }
+  return counts;
+}
+
 // Application-permission collection for one tenant. Returns the same field shape as
 // src/entraAuth.js getTenantSnapshot() (the delegated live-view snapshot) for every
 // field the dashboard actually renders, so the browser can use whichever one it gets
@@ -156,29 +177,37 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`),
     graphGetOptional(token, '/auditLogs/signIns?$top=50&$orderby=createdDateTime desc'),
     dailySignIns(token, 7),
-    graphGetAllPagesOptional(token, '/groups?$top=999&$select=id,displayName,groupTypes,mailEnabled,securityEnabled,onPremisesSyncEnabled,membershipRule'),
+    graphGetAllPagesOptional(token, '/groups?$top=999&$select=id,displayName,groupTypes,mailEnabled,securityEnabled,onPremisesSyncEnabled,membershipRule,createdDateTime'),
   ]);
 
   // /roleManagement/directory/* and /identityProtection/riskyUsers both cap $top at
   // 500, unlike the 999 most other Graph list endpoints (users, applications, groups,
   // devices) allow - confirmed by Graph's own "Invalid page size... 1 and 500" error.
-  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthSample] = await Promise.all([
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, legacyAuthSample, servicePrincipalList] = await Promise.all([
     graphGetAllPagesOptional(token, '/identityProtection/riskyUsers?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
     graphGetOptional(token, '/identity/conditionalAccess/policies?$top=999'),
     graphGetOptional(token, '/subscribedSkus?$select=skuId,skuPartNumber,consumedUnits,prepaidUnits'),
-    graphGetAllPagesOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials&$expand=owners($select=id)'),
+    graphGetAllPagesOptional(token, '/applications?$top=999&$select=id,appId,displayName,keyCredentials,passwordCredentials,createdDateTime&$expand=owners($select=id)'),
     graphGetAllPagesOptional(token, '/reports/servicePrincipalSignInActivities?$top=999', 'beta'),
-    graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses,userType'),
+    graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled,signInActivity,assignedLicenses,userType,createdDateTime'),
     graphGetAllPagesOptional(token, '/users?$top=999&$select=id,displayName,userPrincipalName,accountEnabled&$expand=manager($select=id,displayName,userPrincipalName)'),
-    graphGetAllPagesOptional(token, '/devices?$top=999&$select=id,displayName,operatingSystem,operatingSystemVersion,trustType,isCompliant,accountEnabled,approximateLastSignInDateTime'),
+    graphGetAllPagesOptional(token, '/devices?$top=999&$select=id,displayName,operatingSystem,operatingSystemVersion,trustType,isCompliant,accountEnabled,approximateLastSignInDateTime,registrationDateTime'),
     graphGetAllPagesOptional(token, '/reports/authenticationMethods/userRegistrationDetails?$top=999'),
     graphGetOptional(token, '/servicePrincipals?$count=true&$top=1'),
     graphGetOptional(token, `/servicePrincipals?$count=true&$top=1&$filter=${encodeURIComponent(`servicePrincipalType eq 'ManagedIdentity'`)}`),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleEligibilityScheduleInstances?$top=500'),
     graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${thirtyDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
     graphGetOptional(token, `/auditLogs/signIns?$top=50&$orderby=createdDateTime desc&$filter=${encodeURIComponent(`clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
+    // Full list (not just the count) so privileged role assignments can be
+    // cross-referenced against real service principals - a roleAssignment's
+    // principalId is opaque otherwise, silently mixing human admins and
+    // non-human identities together in Privileged Access/Toxic Combinations
+    // with no way to tell which is which.
+    graphGetAllPagesOptional(token, '/servicePrincipals?$top=999&$select=id,appId,displayName,servicePrincipalType'),
   ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
@@ -223,7 +252,19 @@ export async function collectTenant(tenant, config) {
   const guests = { available: userActivityAvailable, total: userActivityAvailable ? guestList.length : null, memberCount: userActivityAvailable ? users.length - guestList.length : null, staleCount: userActivityAvailable ? guestList.filter((u) => u.enabled !== false && (!u.lastSignIn || new Date(u.lastSignIn).getTime() < guestStaleCutoff)).length : null, list: guestList };
 
   // Legacy authentication - see the identical comment in src/entraAuth.js.
-  const legacyAuth = { available: legacyAuthCount.ok, signIns7d: legacyAuthCount.ok ? Number(legacyAuthCount.data['@odata.count'] || 0) : null, reason: legacyAuthCount.ok ? null : String(legacyAuthCount.error?.message || ''), sample: legacyAuthSample.ok ? (legacyAuthSample.data.value || []).map((s) => ({ id: s.id, user: s.userDisplayName || s.userPrincipalName || 'Service principal', app: s.appDisplayName || '—', clientAppUsed: s.clientAppUsed || 'Unknown', createdDateTime: s.createdDateTime, success: s.status?.errorCode === 0 })) : [] };
+  const legacyAuth = { available: legacyAuthCount.ok, signIns7d: legacyAuthCount.ok ? Number(legacyAuthCount.data['@odata.count'] || 0) : null, signIns30d: legacyAuthCount30d.ok ? Number(legacyAuthCount30d.data['@odata.count'] || 0) : null, reason: legacyAuthCount.ok ? null : String(legacyAuthCount.error?.message || ''), sample: legacyAuthSample.ok ? (legacyAuthSample.data.value || []).map((s) => ({ id: s.id, user: s.userDisplayName || s.userPrincipalName || 'Service principal', app: s.appDisplayName || '—', clientAppUsed: s.clientAppUsed || 'Unknown', createdDateTime: s.createdDateTime, success: s.status?.errorCode === 0 })) : [] };
+
+  // Recent onboarding, across every identity/asset type the dashboard tracks - the
+  // same createdDateTime/registrationDateTime fields already came back on the
+  // existing users/groups/applications/devices queries above (see their $select),
+  // so this costs zero extra Graph calls.
+  const onboarding = {
+    users: userActivityAvailable ? onboardingBuckets(users.filter((u) => u.userType !== 'Guest'), 'createdDateTime') : null,
+    guests: userActivityAvailable ? onboardingBuckets(users.filter((u) => u.userType === 'Guest'), 'createdDateTime') : null,
+    devices: deviceList.ok ? onboardingBuckets(deviceList.data.value || [], 'registrationDateTime') : null,
+    groups: groupRecordsAvailable ? onboardingBuckets(groupRecords, 'createdDateTime') : null,
+    applications: appCredentials.ok ? onboardingBuckets(appCredentials.data.value || [], 'createdDateTime') : null,
+  };
   const licensedUsers = users.filter((u) => (u.assignedLicenses || []).length > 0);
   const staleLicensedUserCount = userActivity.ok
     ? licensedUsers.filter((u) => u.accountEnabled !== false && (!u.signInActivity?.lastSignInDateTime || new Date(u.signInActivity.lastSignInDateTime).getTime() < staleCutoff)).length
@@ -262,6 +303,20 @@ export async function collectTenant(tenant, config) {
   const ownerlessApps = appCredentials.ok ? ownApps.filter((a) => !(a.owners || []).length).map((a) => ({ name: a.displayName || a.appId || 'Unnamed application', appId: a.appId })) : [];
   const credentialBearingApps = appCredentials.ok ? ownApps.filter((a) => (a.keyCredentials || []).length || (a.passwordCredentials || []).length).length : null;
 
+  // Which privileged role assignments belong to a service principal/managed identity
+  // rather than a human - a roleAssignment's principalId alone doesn't say, so without
+  // this cross-reference an admin can't tell "Global Admin" apart from "an automation
+  // account with permanent, unmonitored Global Admin" in Privileged Access or Toxic
+  // Combinations. This is the actual risk non-human identities pose per the collector's
+  // own design notes: standing, rarely-reviewed privileged access with no human tied to it.
+  const servicePrincipalRecords = servicePrincipalList.ok ? servicePrincipalList.data.value || [] : [];
+  const servicePrincipalById = new Map(servicePrincipalRecords.map((sp) => [sp.id, sp]));
+  const privilegedServicePrincipalIds = roleAssignments.ok ? [...privilegedPrincipalIds].filter((id) => servicePrincipalById.has(id)) : [];
+  const privilegedServicePrincipals = privilegedServicePrincipalIds.map((id) => {
+    const sp = servicePrincipalById.get(id);
+    return { id, name: sp.displayName || sp.appId || id, appId: sp.appId || null, type: sp.servicePrincipalType || 'ServicePrincipal' };
+  });
+
   const appActivityAvailable = activityResult.ok && appCredentials.ok;
   const appActivity = appActivityAvailable ? bucketAppActivity(ownApps, activityResult.data.value || []) : { buckets: null, inactiveApps: [], all: [] };
 
@@ -271,6 +326,7 @@ export async function collectTenant(tenant, config) {
   if (managerAvailable) for (const u of managerRecords.data.value || []) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (userActivityAvailable) for (const u of users) if (!nameById.has(u.id)) nameById.set(u.id, u.displayName || u.userPrincipalName);
   if (registrationAvailable) for (const u of registrationList) if (!nameById.has(u.id)) nameById.set(u.id, u.userDisplayName || u.userPrincipalName);
+  for (const sp of servicePrincipalRecords) if (!nameById.has(sp.id)) nameById.set(sp.id, sp.displayName || sp.appId || sp.id);
   const privilegedAccess = { available: roleAssignments.ok && roleEligibility.ok, activeCount: privilegedUsers, eligibleCount: roleEligibility.ok ? eligiblePrincipalIds.size : null, eligibleNotActive: eligibleNotActiveIds.map((id) => ({ id, name: nameById.get(id) || id })), activeNotEligible: activeNotEligibleIds.map((id) => ({ id, name: nameById.get(id) || id })), activeList: roleAssignments.ok ? [...privilegedPrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [], eligibleList: roleEligibility.ok ? [...eligiblePrincipalIds].map((id) => ({ id, name: nameById.get(id) || id })) : [] };
   const mfaMissingIds = new Set(mfaMissingUsers.map((u) => u.id));
   const riskyUserRecords = riskyUsers.ok ? riskyUsers.data.value || [] : [];
@@ -282,7 +338,7 @@ export async function collectTenant(tenant, config) {
     if (registrationAvailable && mfaMissingIds.has(id)) flags.push('No MFA');
     if (riskyUsers.ok && riskyIds.has(id)) flags.push('Risky sign-in (ID Protection)');
     if (userActivityAvailable && staleIds.has(id)) flags.push('Stale 90+ days');
-    if (flags.length) toxicCombinations.push({ id, name: nameById.get(id) || id, flags });
+    if (flags.length) toxicCombinations.push({ id, name: nameById.get(id) || id, flags, nonHuman: servicePrincipalById.has(id) });
   }
   toxicCombinations.sort((a, b) => b.flags.length - a.flags.length);
   const toxicCombinationsAvailable = roleAssignments.ok && (registrationAvailable || riskyUsers.ok || userActivityAvailable);
@@ -308,7 +364,7 @@ export async function collectTenant(tenant, config) {
   ].filter(Boolean);
 
   const orgValue = org.ok ? (org.data.value || [])[0] : null;
-  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, groupRecordsResult];
+  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, groupRecordsResult, servicePrincipalList];
 
   return {
     tenantId: tenant.id,
@@ -365,7 +421,10 @@ export async function collectTenant(tenant, config) {
       credentialBearing: credentialBearingApps,
       ownerlessCount: appCredentials.ok ? ownerlessApps.length : null,
       ownerlessApps: ownerlessApps.slice(0, 200),
+      privilegedCount: roleAssignments.ok && servicePrincipalList.ok ? privilegedServicePrincipals.length : null,
+      privilegedList: privilegedServicePrincipals,
     },
+    onboarding,
     deviceList: deviceList.ok ? (deviceList.data.value || []).map((d) => ({ id: d.id, name: d.displayName, os: d.operatingSystem, osVersion: d.operatingSystemVersion, trustType: d.trustType, compliant: d.isCompliant, enabled: d.accountEnabled, lastSignIn: d.approximateLastSignInDateTime })) : [],
     healthScore,
     healthContributors: scoreContributors,

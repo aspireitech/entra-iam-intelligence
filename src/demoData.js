@@ -112,9 +112,11 @@ export function buildDemoSnapshot(){
   const riskyUserList=range(4).map(i=>({id:`demo-user-${200+i}`,name:personName(200+i),riskLevel:i===0?'high':'medium',riskState:'atRisk',riskLastUpdated:daysAgo(i+1)}));
   const privilegedIds=range(9).map(i=>`demo-user-${i*20}`);
   const toxicCombinations=[
-    {id:privilegedIds[0],name:personName(0),flags:['No MFA','Risky sign-in (ID Protection)']},
-    {id:privilegedIds[3],name:personName(60),flags:['Stale 90+ days']},
+    {id:privilegedIds[0],name:personName(0),flags:['No MFA','Risky sign-in (ID Protection)'],nonHuman:false},
+    {id:privilegedIds[3],name:personName(60),flags:['Stale 90+ days'],nonHuman:false},
+    {id:'demo-sp-1',name:'Legacy Deployment Automation',flags:['No MFA'],nonHuman:true},
   ];
+  const privilegedServicePrincipals=[{id:'demo-sp-1',name:'Legacy Deployment Automation',appId:'demo-app-1',type:'Application'},{id:'demo-sp-2',name:'Nightly Backup Service',appId:'demo-app-2',type:'ManagedIdentity'}];
   const signInTrend=range(7).map(i=>({date:new Date(now-(6-i)*86400000).toISOString().slice(0,10),total:1200+Math.round(Math.sin(i)*180)+i*30}));
   const recentSignIns=range(8).map(i=>({id:`demo-signin-${i}`,createdDateTime:daysAgo(i*0.3),userDisplayName:personName(i),userPrincipalName:upn(i),appDisplayName:['Microsoft 365','Salesforce','Internal Portal','GitHub Enterprise'][i%4],isInteractive:true,status:{errorCode:i===3?50126:0},riskLevelAggregated:i===1?'medium':'none'}));
   const ownerlessApps=range(6).map(i=>({name:apps.appDetails[i*5].name,appId:apps.appDetails[i*5].appId}));
@@ -140,14 +142,21 @@ export function buildDemoSnapshot(){
     mfaCoverageAllUsers:false,
     privilegedAccess:{available:true,activeCount:privilegedIds.length,eligibleCount:14,eligibleNotActive:range(5).map(i=>({id:`demo-user-${300+i}`,name:personName(300+i)})),activeNotEligible:range(3).map(i=>({id:privilegedIds[i],name:personName(i*20)})),activeList:privilegedIds.map(id=>({id,name:personName(Number(id.split('-')[2]))})),eligibleList:range(14).map(i=>({id:`demo-user-${310+i}`,name:personName(310+i)}))},
     guests:{available:true,total:users.guestCount,memberCount:users.total-users.guestCount,staleCount:4,list:users.guestList},
-    legacyAuth:{available:true,signIns7d:3,reason:null,sample:range(3).map(i=>({id:`demo-legacy-${i}`,user:personName(i+9),app:'Exchange Online',clientAppUsed:'IMAP4',createdDateTime:daysAgo(i+1),success:i!==0}))},
+    legacyAuth:{available:true,signIns7d:3,signIns30d:11,reason:null,sample:range(3).map(i=>({id:`demo-legacy-${i}`,user:personName(i+9),app:'Exchange Online',clientAppUsed:'IMAP4',createdDateTime:daysAgo(i+1),success:i!==0}))},
+    onboarding:{
+      users:{last24h:1,last7d:4,last30d:12,last6mo:47},
+      guests:{last24h:0,last7d:1,last30d:3,last6mo:9},
+      devices:{last24h:2,last7d:6,last30d:19,last6mo:63},
+      groups:{last24h:0,last7d:2,last30d:5,last6mo:22},
+      applications:{last24h:0,last7d:1,last30d:3,last6mo:14},
+    },
     credentialExpiry:{available:true,items:apps.credentialItems,expiringSoon:apps.expiringSoon,expiringWithin90:apps.credentialItems.filter(c=>c.daysRemaining>30&&c.daysRemaining<=90).length,expiredSecrets:apps.expiredSecrets,expiredCerts:apps.expiredCerts},
     applicationList:apps.appDetails.map(a=>({id:a.appId,appId:a.appId,name:a.name})),
     deviceList,
     healthScore:72,healthInputs:{},healthContributors:[{key:'mfa',label:'MFA Adoption',score:78},{key:'stale',label:'Stale Accounts',score:66},{key:'privileged',label:'Privileged Access',score:70},{key:'credentials',label:'Credential Hygiene',score:58}],healthExcludedSignals:[],
     permissions:[{name:'User.Read.All',status:'granted',detail:'Demo data - not a live permission check'},{name:'Application.Read.All',status:'granted',detail:'Demo data'},{name:'Group.Read.All',status:'granted',detail:'Demo data'},{name:'Device.Read.All',status:'granted',detail:'Demo data'},{name:'AuditLog.Read.All',status:'granted',detail:'Demo data'}],
     securityPermissionReady:true,
-    nonHumanIdentities:{available:true,totalServicePrincipals:612,managedIdentities:22,appRegistrations:apps.total,credentialBearing:44,ownerlessCount:ownerlessApps.length,ownerlessApps},
+    nonHumanIdentities:{available:true,totalServicePrincipals:612,managedIdentities:22,appRegistrations:apps.total,credentialBearing:44,ownerlessCount:ownerlessApps.length,ownerlessApps,privilegedCount:privilegedServicePrincipals.length,privilegedList:privilegedServicePrincipals},
     collectedAt:new Date().toISOString(),
     coreQueryFailures:[],
   };
