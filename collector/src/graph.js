@@ -153,6 +153,19 @@ function onboardingBuckets(records, dateField) {
   return counts;
 }
 
+// Counts occurrences of a field across a list of records and returns the top N as
+// {name,value} - the shape BarChart already expects. Used for "which application/API/
+// user accounts for the most sign-in volume" - three views over the same sign-in log,
+// not three separate queries.
+function topCounts(records, field, limit = 8) {
+  const counts = new Map();
+  for (const record of records) {
+    const key = record[field] || 'Unknown';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([name, value]) => ({ name, value }));
+}
+
 // Application-permission collection for one tenant. Returns the same field shape as
 // src/entraAuth.js getTenantSnapshot() (the delegated live-view snapshot) for every
 // field the dashboard actually renders, so the browser can use whichever one it gets
@@ -184,7 +197,7 @@ export async function collectTenant(tenant, config) {
   // 500, unlike the 999 most other Graph list endpoints (users, applications, groups,
   // devices) allow - confirmed by Graph's own "Invalid page size... 1 and 500" error.
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
-  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, legacyAuthSample, servicePrincipalList] = await Promise.all([
+  const [riskyUsers, roleAssignments, roleDefinitions, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, legacyAuthSample, servicePrincipalList, signInLog] = await Promise.all([
     graphGetAllPagesOptional(token, '/identityProtection/riskyUsers?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleAssignments?$top=500'),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleDefinitions?$top=500&$filter=isBuiltIn eq true'),
@@ -208,6 +221,13 @@ export async function collectTenant(tenant, config) {
     // non-human identities together in Privileged Access/Toxic Combinations
     // with no way to tell which is which.
     graphGetAllPagesOptional(token, '/servicePrincipals?$top=999&$select=id,appId,displayName,servicePrincipalType'),
+    // Full 7-day sign-in log (not just the top-50 "recent activity" list above) so
+    // "which client app / API / user accounts for the most sign-in volume" can be a
+    // real tenant-wide count, not a guess from the last 50 events. $select trimmed to
+    // just the three fields the aggregation needs - this is the single largest list
+    // this collector fetches, so keeping the payload per record minimal matters at
+    // scale. maxPages caps it at ~60,000 sign-ins/cycle as a hard safety limit.
+    graphGetAllPagesOptional(token, `/auditLogs/signIns?$top=999&$select=appDisplayName,resourceDisplayName,userDisplayName,userPrincipalName&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),
   ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
@@ -253,6 +273,20 @@ export async function collectTenant(tenant, config) {
 
   // Legacy authentication - see the identical comment in src/entraAuth.js.
   const legacyAuth = { available: legacyAuthCount.ok, signIns7d: legacyAuthCount.ok ? Number(legacyAuthCount.data['@odata.count'] || 0) : null, signIns30d: legacyAuthCount30d.ok ? Number(legacyAuthCount30d.data['@odata.count'] || 0) : null, reason: legacyAuthCount.ok ? null : String(legacyAuthCount.error?.message || ''), sample: legacyAuthSample.ok ? (legacyAuthSample.data.value || []).map((s) => ({ id: s.id, user: s.userDisplayName || s.userPrincipalName || 'Service principal', app: s.appDisplayName || '—', clientAppUsed: s.clientAppUsed || 'Unknown', createdDateTime: s.createdDateTime, success: s.status?.errorCode === 0 })) : [] };
+
+  // Application/API/user usage - "who/what is generating the most sign-in traffic",
+  // aggregated from the full 7-day sign-in log fetched above (not the 50-row recent
+  // list, which skews toward whoever signed in most recently rather than most often).
+  const usageAnalytics = {
+    available: signInLog.ok,
+    reason: signInLog.ok ? null : String(signInLog.error?.message || ''),
+    windowDays: 7,
+    totalSignIns: signInLog.ok ? (signInLog.data.value || []).length : null,
+    truncated: signInLog.ok ? Boolean(signInLog.data.truncated) : false,
+    apps: signInLog.ok ? topCounts(signInLog.data.value || [], 'appDisplayName') : [],
+    resources: signInLog.ok ? topCounts(signInLog.data.value || [], 'resourceDisplayName') : [],
+    users: signInLog.ok ? topCounts((signInLog.data.value || []).map((s) => ({ who: s.userDisplayName || s.userPrincipalName || 'Service principal / unattended' })), 'who') : [],
+  };
 
   // Recent onboarding, across every identity/asset type the dashboard tracks - the
   // same createdDateTime/registrationDateTime fields already came back on the
@@ -364,7 +398,7 @@ export async function collectTenant(tenant, config) {
   ].filter(Boolean);
 
   const orgValue = org.ok ? (org.data.value || [])[0] : null;
-  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, groupRecordsResult, servicePrincipalList];
+  const results = [org, appsCount, usersCount, groupsCount, devicesCount, signIns7d, riskySignIns7d, recentSignInsResult, riskyUsers, roleAssignments, conditionalAccess, subscribedSkus, appCredentials, activityResult, userActivity, managerRecords, deviceList, registration, servicePrincipalCount, managedIdentityCount, roleEligibility, legacyAuthCount, legacyAuthCount30d, groupRecordsResult, servicePrincipalList, signInLog];
 
   return {
     tenantId: tenant.id,
@@ -425,6 +459,7 @@ export async function collectTenant(tenant, config) {
       privilegedList: privilegedServicePrincipals,
     },
     onboarding,
+    usageAnalytics,
     deviceList: deviceList.ok ? (deviceList.data.value || []).map((d) => ({ id: d.id, name: d.displayName, os: d.operatingSystem, osVersion: d.operatingSystemVersion, trustType: d.trustType, compliant: d.isCompliant, enabled: d.accountEnabled, lastSignIn: d.approximateLastSignInDateTime })) : [],
     healthScore,
     healthContributors: scoreContributors,
