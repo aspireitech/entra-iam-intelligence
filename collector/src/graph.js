@@ -2,27 +2,79 @@ import { getAppToken, getAzureManagementToken } from './msal.js';
 
 const GRAPH_BASE = 'https://graph.microsoft.com';
 
+// Bounds how many requests can be in flight at once through a shared gate - a plain
+// counting semaphore, not a rate limiter with a clock: requests queue up and are let
+// through one at a time as slots free up, which naturally staggers a burst (e.g. 7
+// same-instant daily-signin-count requests) into a steady trickle with zero hardcoded
+// delays. Two instances exist below: one process-wide cap on ALL Graph calls (matters
+// once users+groups+devices+applications+servicePrincipals are all paginating
+// concurrently with each other at enterprise scale - 30k/50k/20k objects each), and a
+// second, tighter one specifically for /auditLogs/signIns - one of Graph's more
+// tightly-throttled endpoints, hit from ~8 different call sites in one collection
+// cycle (sign-in counts, the daily trend, legacy-auth counts/sample, and the usage-
+// analytics log). Slots are released even while a request is mid-retry-backoff, so a
+// single request waiting out a Retry-After never holds up everything else.
+class Semaphore {
+  constructor(max) { this.max = max; this.count = 0; this.queue = []; }
+  async acquire() {
+    if (this.count < this.max) { this.count++; return; }
+    await new Promise((resolve) => this.queue.push(resolve));
+    this.count++;
+  }
+  release() {
+    this.count--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+// Conservative, hardcoded production defaults - not exposed in tenants.json since
+// getting this wrong in either direction (too high = back to bursting Graph, too low
+// = a collection cycle that runs long) isn't something day-to-day operation should
+// need to tune. Revisit these two numbers specifically if enterprise-scale testing
+// (30k+ groups/50k+ users/20k+ apps) shows they need adjusting.
+const graphSemaphore = new Semaphore(4);
+const signInSemaphore = new Semaphore(2);
+// Hard ceiling on how many pages the usage-analytics full sign-in log fetch will pull,
+// well below the generic 60-page safety cap used everywhere else. That generic cap
+// exists to catch a runaway paginate on directory objects (users/groups/apps) where
+// completeness matters for accurate counts; this fetch only needs a large, honest
+// SAMPLE to identify top apps/APIs/users by volume, not the exact full population - so
+// at enterprise scale (a 50k-user tenant can generate far more than 15,000 sign-ins in
+// 7 days) it deliberately stays bounded rather than ballooning into tens of thousands
+// of paginated requests against Graph's tightest-throttled endpoint every cycle.
+const USAGE_ANALYTICS_MAX_PAGES = 15;
+
 // Bounded retry on throttling only (429, and 503 which Graph also uses for transient
 // overload), honoring the Retry-After header Graph sends - the browser-side fetcher in
 // src/entraAuth.js has always had this; this one didn't, which meant a single burst of
 // throttling here failed a field outright instead of recovering within the same cycle.
 // Confirmed as the actual cause of a real "Legacy Authentication: Unavailable (429)"
-// report - the new full-7-day sign-in log fetch added for usage analytics (below) hits
-// the same /auditLogs/signIns endpoint in the same burst as the legacy-auth queries,
-// which was enough to occasionally trip this tenant's rate limit.
+// report - the full-7-day sign-in log fetch added for usage analytics (below) hits the
+// same /auditLogs/signIns endpoint in the same burst as the legacy-auth queries, which
+// was enough to occasionally trip this tenant's rate limit. The semaphores above are
+// the actual fix for the burst itself; this retry is the safety net for whatever
+// throttling still gets through.
 const GRAPH_MAX_RETRIES = 2;
-async function graphGet(token, path, version = 'v1.0') {
+async function graphGet(token, path, version = 'v1.0', extraSemaphore = null) {
   const url = path.startsWith('https://') ? path : `${GRAPH_BASE}/${version}${path}`;
   for (let attempt = 0; ; attempt++) {
-    const response = await fetch(url, {
-      // A browser always sends an Accept-Language header on every request; Node's
-      // fetch sends none at all. That's invisible almost everywhere, but the PIM
-      // endpoints (roleEligibilityScheduleInstances) throw a 400
-      // CultureNotFoundException ("* is an invalid culture identifier") server-side
-      // when it's absent - confirmed as a known Graph PIM quirk, not specific to
-      // this tenant. Harmless to send everywhere else, so it's not conditional.
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual', 'Accept-Language': 'en-US' },
-    });
+    await graphSemaphore.acquire();
+    if (extraSemaphore) await extraSemaphore.acquire();
+    let response;
+    try {
+      response = await fetch(url, {
+        // A browser always sends an Accept-Language header on every request; Node's
+        // fetch sends none at all. That's invisible almost everywhere, but the PIM
+        // endpoints (roleEligibilityScheduleInstances) throw a 400
+        // CultureNotFoundException ("* is an invalid culture identifier") server-side
+        // when it's absent - confirmed as a known Graph PIM quirk, not specific to
+        // this tenant. Harmless to send everywhere else, so it's not conditional.
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ConsistencyLevel: 'eventual', 'Accept-Language': 'en-US' },
+      });
+    } finally {
+      graphSemaphore.release();
+      if (extraSemaphore) extraSemaphore.release();
+    }
     if (response.ok) return response.json();
     if ((response.status === 429 || response.status === 503) && attempt < GRAPH_MAX_RETRIES) {
       const retryAfter = Number(response.headers.get('retry-after'));
@@ -37,9 +89,9 @@ async function graphGet(token, path, version = 'v1.0') {
   }
 }
 
-async function graphGetOptional(token, path, version) {
+async function graphGetOptional(token, path, version, extraSemaphore) {
   try {
-    return { ok: true, data: await graphGet(token, path, version) };
+    return { ok: true, data: await graphGet(token, path, version, extraSemaphore) };
   } catch (error) {
     // Previously swallowed with no trace anywhere - a dashboard page or report
     // going quietly "unavailable" gave no way to tell why short of guessing.
@@ -56,10 +108,10 @@ async function graphGetOptional(token, path, version) {
 // silently truncated - at 17,000 app registrations or 30,000 users, a single-page
 // fetch would undercount stale users, inactive apps, expiring credentials etc.
 // rather than reporting them accurately. maxPages is a hard safety cap.
-async function graphGetAllPages(token, path, version = 'v1.0', maxPages = 60) {
+async function graphGetAllPages(token, path, version = 'v1.0', maxPages = 60, extraSemaphore = null) {
   let url = path, all = [], pages = 0, page;
   while (url && pages < maxPages) {
-    page = await graphGet(token, url, version);
+    page = await graphGet(token, url, version, extraSemaphore);
     all = all.concat(page.value || []);
     url = page['@odata.nextLink'] || null;
     pages++;
@@ -67,9 +119,9 @@ async function graphGetAllPages(token, path, version = 'v1.0', maxPages = 60) {
   return { value: all, truncated: Boolean(url) };
 }
 
-async function graphGetAllPagesOptional(token, path, version) {
+async function graphGetAllPagesOptional(token, path, version, maxPages, extraSemaphore) {
   try {
-    return { ok: true, data: await graphGetAllPages(token, path, version) };
+    return { ok: true, data: await graphGetAllPages(token, path, version, maxPages, extraSemaphore) };
   } catch (error) {
     console.warn(`[collector] ${error.message}`);
     return { ok: false, error };
@@ -111,7 +163,7 @@ async function dailySignIns(token, days = 7) {
     const start = new Date(now); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - i);
     const end = new Date(start); end.setDate(end.getDate() + 1);
     const filter = `createdDateTime ge ${start.toISOString()} and createdDateTime lt ${end.toISOString()}`;
-    requests.push(graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(filter)}`));
+    requests.push(graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(filter)}`, undefined, signInSemaphore));
   }
   const results = await Promise.all(requests);
   return results.map((r, i) => {
@@ -274,9 +326,9 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, '/users?$count=true&$top=1'),
     graphGetOptional(token, '/groups?$count=true&$top=1'),
     graphGetOptional(token, '/devices?$count=true&$top=1'),
-    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),
-    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`),
-    graphGetOptional(token, '/auditLogs/signIns?$top=50&$orderby=createdDateTime desc'),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`, undefined, signInSemaphore),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and riskLevelAggregated ne 'none'`)}`, undefined, signInSemaphore),
+    graphGetOptional(token, '/auditLogs/signIns?$top=50&$orderby=createdDateTime desc', undefined, signInSemaphore),
     dailySignIns(token, 7),
     graphGetAllPagesOptional(token, '/groups?$top=999&$select=id,displayName,groupTypes,mailEnabled,securityEnabled,onPremisesSyncEnabled,membershipRule,createdDateTime'),
   ]);
@@ -300,9 +352,9 @@ export async function collectTenant(tenant, config) {
     graphGetOptional(token, '/servicePrincipals?$count=true&$top=1'),
     graphGetOptional(token, `/servicePrincipals?$count=true&$top=1&$filter=${encodeURIComponent(`servicePrincipalType eq 'ManagedIdentity'`)}`),
     graphGetAllPagesOptional(token, '/roleManagement/directory/roleEligibilityScheduleInstances?$top=500'),
-    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
-    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${thirtyDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
-    graphGetOptional(token, `/auditLogs/signIns?$top=50&$orderby=createdDateTime desc&$filter=${encodeURIComponent(`clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`, undefined, signInSemaphore),
+    graphGetOptional(token, `/auditLogs/signIns?$count=true&$top=1&$filter=${encodeURIComponent(`createdDateTime ge ${thirtyDaysAgo} and clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`, undefined, signInSemaphore),
+    graphGetOptional(token, `/auditLogs/signIns?$top=50&$orderby=createdDateTime desc&$filter=${encodeURIComponent(`clientAppUsed ne 'Browser' and clientAppUsed ne 'Mobile Apps and Desktop clients'`)}`, undefined, signInSemaphore),
     // Full list (not just the count) so privileged role assignments can be
     // cross-referenced against real service principals - a roleAssignment's
     // principalId is opaque otherwise, silently mixing human admins and
@@ -314,8 +366,11 @@ export async function collectTenant(tenant, config) {
     // real tenant-wide count, not a guess from the last 50 events. $select trimmed to
     // just the three fields the aggregation needs - this is the single largest list
     // this collector fetches, so keeping the payload per record minimal matters at
-    // scale. maxPages caps it at ~60,000 sign-ins/cycle as a hard safety limit.
-    graphGetAllPagesOptional(token, `/auditLogs/signIns?$top=999&$select=appDisplayName,resourceDisplayName,userDisplayName,userPrincipalName&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`),
+    // scale. maxPages caps it at USAGE_ANALYTICS_MAX_PAGES * 999 sign-ins/cycle as a hard
+    // safety limit, and it shares signInSemaphore with the rest of the sign-in family so
+    // its page-by-page fetch never adds to the burst of concurrent /auditLogs/signIns calls
+    // above - it's paced through the same 2-at-a-time gate instead of racing them.
+    graphGetAllPagesOptional(token, `/auditLogs/signIns?$top=999&$select=appDisplayName,resourceDisplayName,userDisplayName,userPrincipalName&$filter=${encodeURIComponent(`createdDateTime ge ${sevenDaysAgo}`)}`, undefined, USAGE_ANALYTICS_MAX_PAGES, signInSemaphore),
   ]);
 
   const definitions = roleDefinitions.ok ? roleDefinitions.data.value || [] : [];
