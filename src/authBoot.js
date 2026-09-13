@@ -66,6 +66,17 @@ function renderError(error){render(`<div class="auth-card error-card"><div class
 function renderConnecting(account){render(`<div class="auth-card"><div class="auth-kicker">SIGNED IN</div><h2>Opening your dashboard…</h2><p>Reusing the existing Microsoft Entra consent for <b>${escapeHtml(account.username||account.name||'your account')}</b>. No extra click needed unless a new permission requires approval.</p></div>`);}
 async function connectAndLoad(account){try{const result=await connectTenant();if(result?.accessToken){sessionStorage.setItem('iam_tenant_connected','true');sessionStorage.setItem('iam_tenant_id',result.account?.tenantId||account.tenantId||'');await loadDashboard(result.account||account);}}catch(error){renderError(error);}}
 async function bootstrap(){
+  // A marketing link (e.g. from a public landing page's "Try demo" button, after
+  // lead capture) needs somewhere to actually land - without this, ?demo=1 does
+  // nothing and the visitor lands on the generic sign-in screen, having to spot
+  // the small "View demo dashboard" button themselves. Cleared from the URL via
+  // replaceState so refreshing/sharing the tab afterward doesn't re-trigger it -
+  // isDemoMode()'s sessionStorage flag is what actually persists the session.
+  if(!isDemoMode()&&new URLSearchParams(location.search).get('demo')==='1'){
+    history.replaceState(null,'',location.pathname+location.hash);
+    loadDemoSnapshot();
+    return;
+  }
   if(isDemoMode()){loadDemoSnapshot();return;}
   if(isLocalLoginMode()){loadLocalSnapshot();return;}
   if(!AUTH_CONFIGURED){render(`<div class="auth-card"><div class="auth-kicker">IAM INTELLIGENCE</div><h2>Configuration required</h2><p>The Microsoft Entra application client ID is not configured.</p><div class="auth-error">Expected VITE_ENTRA_CLIENT_ID for the multitenant SPA.</div>${LOCAL_LOGIN_LINK}${DEMO_LINK}</div>`);return;}
