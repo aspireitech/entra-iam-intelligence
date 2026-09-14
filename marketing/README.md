@@ -63,6 +63,14 @@ Point this at wherever the real dashboard is actually deployed.
    test entry, confirm you land on the demo, then check
    `https://your-subdomain/admin.php?token=<your admin_token>` to see it
    listed.
+7. **(Optional) Redirect the apex domain.** If `aspireitech.net` (no `iam.`
+   prefix) is otherwise empty, upload `apex-redirect.php` from this folder as
+   `index.php` at the apex domain's own document root (its `public_html`,
+   separate from `marketing/public`). It just 301-redirects every request to
+   `iam.aspireitech.net`, so the bare domain still works without duplicating
+   content across two URLs - duplicate content on two domains confuses search
+   engines about which is canonical. Delete that one file whenever you're
+   ready to put a real company site on the apex instead.
 
 ## Viewing captured leads
 
