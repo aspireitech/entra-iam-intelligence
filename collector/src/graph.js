@@ -571,6 +571,8 @@ export async function collectTenant(tenant, config) {
     signInTrend,
     signInsAvailable: signIns7d.ok,
     signInsReason: signIns7d.ok ? null : String(signIns7d.error?.message || ''),
+    riskySignIns7dAvailable: riskySignIns7d.ok,
+    riskySignIns7dReason: riskySignIns7d.ok ? null : String(riskySignIns7d.error?.message || ''),
     appActivity: appActivity.buckets,
     appPopulation: ownApps.length,
     inactiveApps: appActivity.inactiveApps,
