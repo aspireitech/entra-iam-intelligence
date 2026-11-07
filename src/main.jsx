@@ -98,7 +98,63 @@ function BarChart({items}){const max=Math.max(...items.map(x=>x.value||0),1);ret
 function Sparkline({points}){const usable=points.filter(p=>p.total!=null);if(!usable.length)return <div className="empty-state">No sign-in trend data available.</div>;const max=Math.max(...usable.map(p=>p.total),1);const coords=usable.map((p,i)=>`${(i/Math.max(1,usable.length-1))*392+8},${84-(p.total/max)*70}`).join(' ');return <svg className="spark" viewBox="0 0 408 92" preserveAspectRatio="none"><polyline points={coords} fill="none" stroke="currentColor" strokeWidth="2.5"/><line x1="0" y1="88" x2="408" y2="88" stroke="rgba(255,255,255,.07)"/><line x1="0" y1="44" x2="408" y2="44" stroke="rgba(255,255,255,.05)"/></svg>}
 function Status({ok,label='Live'}){return <span className={`status-pill ${ok?'ok':'warn'}`}><i/> {ok?label:'Permission required'}</span>}
 
-function useFilter(){const [q,setQ]=useState('');return [q,setQ];}
+// Users is the one category scoped to "flagged only" (MFA gap / stale / no manager) -
+// the Users page itself only ever shows those three lists, never a plain directory,
+// so a clean/compliant user genuinely has nowhere to navigate to. Every other
+// category below is a full inventory already, so it's searched unrestricted.
+function searchEntities(data,rawQuery){
+  const needle=rawQuery.trim().toLowerCase();
+  if(!data||needle.length<2)return [];
+  const hit=(...parts)=>parts.filter(Boolean).join(' ').toLowerCase().includes(needle);
+  const out=[];
+  const mfaMissingIds=new Set((data.mfa?.missingUsers||[]).map(u=>u.id));
+  const staleIds=new Set((data.staleUserList||[]).map(u=>u.id));
+  const noMgrIds=new Set((data.usersWithoutManagerList||[]).map(u=>u.id));
+  const userItems=(data.userActivityList||[]).filter(u=>(mfaMissingIds.has(u.id)||staleIds.has(u.id)||noMgrIds.has(u.id))&&hit(u.name,u.upn)).slice(0,6).map(u=>({key:`user-${u.id}`,label:u.name,sub:u.upn,page:'Users',query:u.name,focusId:mfaMissingIds.has(u.id)?'mfa-missing':staleIds.has(u.id)?'stale-users':'without-manager',tag:mfaMissingIds.has(u.id)?'No MFA':staleIds.has(u.id)?'Stale':'No manager'}));
+  if(userItems.length)out.push({category:'Users',note:'flagged only - MFA gap, stale, or no manager',items:userItems});
+  const guestItems=(data.guests?.list||[]).filter(u=>hit(u.name,u.upn)).slice(0,6).map(u=>({key:`guest-${u.id}`,label:u.name,sub:u.upn,page:'Guests',query:u.name}));
+  if(guestItems.length)out.push({category:'Guests',items:guestItems});
+  const deviceItems=(data.deviceList||[]).filter(d=>hit(d.name,d.os)).slice(0,6).map(d=>({key:`device-${d.id}`,label:d.name,sub:[d.os,d.osVersion].filter(Boolean).join(' '),page:'Devices',query:d.name}));
+  if(deviceItems.length)out.push({category:'Devices',items:deviceItems});
+  const groupItems=(data.groupList||[]).filter(g=>hit(g.name)).slice(0,6).map(g=>({key:`group-${g.id}`,label:g.name,sub:g.type,page:'Groups',query:g.name}));
+  if(groupItems.length)out.push({category:'Groups',items:groupItems});
+  const appItems=(data.applicationList||[]).filter(a=>hit(a.name)).slice(0,6).map(a=>({key:`app-${a.id}`,label:a.name,sub:a.appId,page:'Applications',query:a.name}));
+  if(appItems.length)out.push({category:'Applications',items:appItems});
+  return out;
+}
+function GlobalSearch({data,onSelect}){
+  const [q,setQ]=useState('');const [open,setOpen]=useState(false);const [highlight,setHighlight]=useState(0);
+  const boxRef=useRef(null);
+  useEffect(()=>{
+    const onDocClick=e=>{if(boxRef.current&&!boxRef.current.contains(e.target))setOpen(false);};
+    document.addEventListener('mousedown',onDocClick);
+    return()=>document.removeEventListener('mousedown',onDocClick);
+  },[]);
+  const groups=searchEntities(data,q);
+  const flat=groups.flatMap(g=>g.items);
+  const choose=item=>{onSelect(item);setQ('');setOpen(false);setHighlight(0);};
+  const onKeyDown=e=>{
+    if(e.key==='Escape'){setOpen(false);return;}
+    if(!flat.length)return;
+    if(e.key==='ArrowDown'){e.preventDefault();setHighlight(h=>Math.min(h+1,flat.length-1));}
+    else if(e.key==='ArrowUp'){e.preventDefault();setHighlight(h=>Math.max(h-1,0));}
+    else if(e.key==='Enter'){e.preventDefault();if(flat[highlight])choose(flat[highlight]);}
+  };
+  return <div className="global-search" ref={boxRef}>
+    <span className="global-search-icon">⌕</span>
+    <input className="global-search-input" placeholder="Search users, devices, groups, apps…" value={q} onChange={e=>{setQ(e.target.value);setOpen(true);setHighlight(0);}} onFocus={()=>q.trim().length>=2&&setOpen(true)} onKeyDown={onKeyDown}/>
+    {open&&q.trim().length>=2&&<div className="global-search-results">
+      {!groups.length?<div className="global-search-empty">No matches in loaded data.</div>:groups.map(g=><div className="global-search-group" key={g.category}>
+        <div className="global-search-group-label">{g.category}{g.note&&<small> — {g.note}</small>}</div>
+        {g.items.map(item=>{const idx=flat.indexOf(item);return <button key={item.key} className={`global-search-item ${idx===highlight?'active':''}`} onMouseEnter={()=>setHighlight(idx)} onClick={()=>choose(item)}>
+          <span className="gsi-label">{item.label}</span><span className="gsi-sub">{item.sub}</span>{item.tag&&<span className="gsi-tag">{item.tag}</span>}
+        </button>;})}
+      </div>)}
+    </div>}
+  </div>;
+}
+
+function useFilter(seed){const [q,setQ]=useState(seed||'');useEffect(()=>{if(seed)setQ(seed);},[seed]);return [q,setQ];}
 function csvCell(v){const s=v==null?'':String(v);return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;}
 function toCsv(rows,columns){const header=columns.map(c=>csvCell(c.label)).join(',');const lines=rows.map(r=>columns.map(c=>csvCell(typeof c.value==='function'?c.value(r):r[c.value])).join(','));return [header,...lines].join('\r\n');}
 function downloadCsv(filename,rows,columns){const blob=new Blob([toCsv(rows,columns)],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename.endsWith('.csv')?filename:`${filename}.csv`;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);}
@@ -108,8 +164,9 @@ function downloadCsv(filename,rows,columns){const blob=new Blob([toCsv(rows,colu
 function ExportBar({rows,columns,filename}){return <div className="export-bar"><button className="header-action" onClick={()=>downloadCsv(filename,rows,columns)} disabled={!rows.length}>⬇ Export CSV</button><button className="header-action" onClick={()=>window.print()} disabled={!rows.length}>⎙ Print / Save as PDF</button></div>;}
 function FilterBar({q,onQ,placeholder,children,count,total,exportRows,exportColumns,exportFilename}){return <div className="detail-toolbar"><div className="filter-bar"><input className="filter-input" placeholder={placeholder} value={q} onChange={e=>onQ(e.target.value)}/>{children}</div><span className="filter-count">{count===total?`${fmt(total)} total`:`${fmt(count)} of ${fmt(total)}`}</span>{exportRows&&<ExportBar rows={exportRows} columns={exportColumns} filename={exportFilename}/>}</div>}
 
-function UsersDetailPage({data}){
-  const [mfaQ,setMfaQ]=useFilter();const [staleQ,setStaleQ]=useFilter();const [staleDays,setStaleDays]=useState(90);const [mgrQ,setMgrQ]=useFilter();const [focus,setFocus]=useState(null);
+function UsersDetailPage({data,initialQuery,initialFocus,seedNonce}){
+  const [mfaQ,setMfaQ]=useFilter(initialQuery);const [staleQ,setStaleQ]=useFilter(initialQuery);const [staleDays,setStaleDays]=useState(90);const [mgrQ,setMgrQ]=useFilter(initialQuery);const [focus,setFocus]=useState(null);
+  useEffect(()=>{if(seedNonce&&initialFocus)goTo(setFocus,initialFocus);},[seedNonce]);
   const mfaMissing=data.mfa?.missingUsers||[];
   const staleCutoff=Date.now()-staleDays*86400000;
   const staleComputed=(data.userActivityList||[]).filter(u=>u.enabled!==false&&(!u.lastSignIn||new Date(u.lastSignIn).getTime()<staleCutoff));
@@ -149,8 +206,9 @@ function AppEventsCard({events}){
   return <Card title="Recently Registered Applications">{!events?<div className="empty-state">Loading…</div>:!events.ok?<div className="empty-state">{events.reason}</div>:!list.length?<div className="empty-state">No new application registrations observed by the collector in this window.</div>:<div className="license-table"><table><thead><tr><th>Application</th><th>Registered</th><th>Source</th></tr></thead><tbody>{list.map(e=><tr key={e.audit_id}><td>{e.app_name||e.app_id||'Unknown'}</td><td>{new Date(e.activity_datetime).toLocaleString()}</td><td>{e.actor_type==='application'?`Automation${e.actor_name?': '+e.actor_name:''}`:e.actor_type==='user'?`Person${e.actor_name?': '+e.actor_name:''}`:'Unknown'}</td></tr>)}</tbody></table></div>}<div className="disclaimer">Source = who/what performed the "Add application" audit event: a person (interactive sign-in) or an automation using its own credential (Terraform, CI/CD, a script). Graph doesn't expose finer detail than that.</div></Card>;
 }
 
-function ApplicationsDetailPage({data}){
-  const [q,setQ]=useFilter();const [bucket,setBucket]=useState('all');const [credThreshold,setCredThreshold]=useState(30);const [credOnly,setCredOnly]=useState(false);const [credExpiredOnly,setCredExpiredOnly]=useState(null);const [trendDays,setTrendDays]=useState(30);const [focus,setFocus]=useState(null);
+function ApplicationsDetailPage({data,initialQuery,seedNonce}){
+  const [q,setQ]=useFilter(initialQuery);const [bucket,setBucket]=useState('all');const [credThreshold,setCredThreshold]=useState(30);const [credOnly,setCredOnly]=useState(false);const [credExpiredOnly,setCredExpiredOnly]=useState(null);const [trendDays,setTrendDays]=useState(30);const [focus,setFocus]=useState(null);
+  useEffect(()=>{if(seedNonce){setBucket('all');setCredOnly(false);setCredExpiredOnly(null);goTo(setFocus,'app-inventory');}},[seedNonce]);
   const tenantId=data.organization?.id;
   const {delta,events}=useCollectorHistory(tenantId,trendDays);
   const details=data.appDetails||[];
@@ -207,8 +265,9 @@ function RiskRegisterPage({data,collectorStatus}){
   return <div className="source-page"><section className="grid top-grid single"><Card title={`Risk Register (${entries.length} exception${entries.length===1?'':'s'})`}>{!entries.length?<div className="empty-state large">No exceptions acknowledged yet. Acknowledge a Need Attention or Toxic Combination finding to add it here with an audit note.</div>:<div className="license-table"><table><thead><tr><th>Finding</th><th>Category</th><th>Note</th><th>Acknowledged</th><th></th></tr></thead><tbody>{entries.map(([key,ex])=><tr key={key}><td>{ex.title||key}</td><td>{ex.category||'—'}</td><td>{ex.note}</td><td>{new Date(ex.at).toLocaleString()}</td><td><button className="ack-chip" onClick={()=>unacknowledge(key)}>Undo</button></td></tr>)}</tbody></table></div>}<div className="disclaimer">{shared?'Shared across every admin pointed at this same collector - stored in the collector\'s database, not this browser, so everyone sees the same acknowledgments.':'Stored in this browser\'s local storage only - not shared across users. Connect the collector (see Data Sources) to make this register shared across every admin instead of per-browser.'}</div></Card></section></div>;
 }
 
-function DevicesDetailPage({data}){
-  const [q,setQ]=useFilter();const [status,setStatus]=useState('all');const [focus,setFocus]=useState(null);
+function DevicesDetailPage({data,initialQuery,seedNonce}){
+  const [q,setQ]=useFilter(initialQuery);const [status,setStatus]=useState('all');const [focus,setFocus]=useState(null);
+  useEffect(()=>{if(seedNonce){setStatus('all');goTo(setFocus,'device-inventory');}},[seedNonce]);
   const devices=data.deviceList||[];
   // compliant is a tri-state from Graph: true, false, or null/undefined when the
   // device has no reported compliance state at all (not Intune-managed, or the
@@ -342,8 +401,9 @@ function ConditionalAccessDetailPage({data,onSecurity}){
   </div>;
 }
 
-function GroupsDetailPage({data}){
-  const [q,setQ]=useFilter();const [sync,setSync]=useState('all');const [type,setType]=useState('all');const [focus,setFocus]=useState(null);
+function GroupsDetailPage({data,initialQuery,seedNonce}){
+  const [q,setQ]=useFilter(initialQuery);const [sync,setSync]=useState('all');const [type,setType]=useState('all');const [focus,setFocus]=useState(null);
+  useEffect(()=>{if(seedNonce){setSync('all');setType('all');goTo(setFocus,'group-inventory');}},[seedNonce]);
   const groups=data.groupList||[];
   // Each KPI/donut click sets BOTH filter dimensions explicitly (never just one) -
   // otherwise a leftover value from a previous click (e.g. type still 'dynamic'
@@ -377,8 +437,9 @@ function GroupsDetailPage({data}){
   </div>;
 }
 
-function GuestsPage({data,onNavigate}){
-  const [q,setQ]=useFilter();const [staleOnly,setStaleOnly]=useState(false);
+function GuestsPage({data,onNavigate,initialQuery}){
+  const [q,setQ]=useFilter(initialQuery);const [staleOnly,setStaleOnly]=useState(false);
+  useEffect(()=>{if(initialQuery)setStaleOnly(false);},[initialQuery]);
   const g=data.guests||{};
   const guestStaleCutoff=Date.now()-90*86400000;
   const isStale=u=>u.enabled!==false&&(!u.lastSignIn||new Date(u.lastSignIn).getTime()<guestStaleCutoff);
@@ -783,7 +844,7 @@ function App(){
     const cached=getLocalSnapshot(sessionStorage.getItem('iam_tenant_id'));
     return cached?{...cached.snapshot,dataSource:'stale-cache',cachedAt:cached.savedAt}:null;
   });
-  const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [azureData,setAzureData]=useState(null);const [azureLoading,setAzureLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);
+  const [cachedOverview]=useState(()=>window.__IAM_SNAPSHOT__?null:getCachedOverview());const [sourceData,setSourceData]=useState(null);const [loading,setLoading]=useState(!window.__IAM_SNAPSHOT__);const [toast,setToast]=useState('');const [adStatus,setAdStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [licenseData,setLicenseData]=useState(null);const [licenseLoading,setLicenseLoading]=useState(false);const [appConsentData,setAppConsentData]=useState(null);const [appConsentLoading,setAppConsentLoading]=useState(false);const [azureData,setAzureData]=useState(null);const [azureLoading,setAzureLoading]=useState(false);const [collectorStatus,setCollectorStatus]=useState({configured:false,connected:false,detail:'Checking…'});const [combinedData,setCombinedData]=useState(null);const [signInTrend,setSignInTrend]=useState(null);const [signInTrendDays,setSignInTrendDays]=useState(7);const [signInTrendLoading,setSignInTrendLoading]=useState(false);const [searchSeed,setSearchSeed]=useState(null);
   useEffect(()=>{const h=e=>{setData(e.detail);setLoading(false)};document.addEventListener('iam-live-data',h);return()=>document.removeEventListener('iam-live-data',h)},[]);
   useEffect(()=>{checkAdAgent().then(setAdStatus)},[]);
   useEffect(()=>{checkCollector().then(setCollectorStatus)},[]);
@@ -837,6 +898,13 @@ function App(){
   const title=active==='Licenses'?'Licenses':sourceId==='entra'?(active==='Overview'?'Executive Overview':active):sourceId==='ad'?(active==='Overview'?'Active Directory Overview':active):sourceById(sourceId).name;
   const visibleLabels=new Set(NAV_BY_SOURCE[sourceId]||['Overview','Data Sources']);
   const chooseNav=label=>{if(!visibleLabels.has(label))return;setActive(label);};
+  // A search result's category already resolved which page and (for Users) which
+  // flagged list it belongs to - navigating is just chooseNav plus a one-shot seed
+  // the target page reads once. seedNonce changes on every click (even re-clicking
+  // the same result) so the target page's focus-jump effect always refires, not
+  // just when the query string happens to differ from last time.
+  const onSearchSelect=item=>{chooseNav(item.page);setSearchSeed({page:item.page,query:item.query,focusId:item.focusId,nonce:Date.now()});};
+  const seedForActive=searchSeed&&searchSeed.page===active?searchSeed:null;
   // Collapsed state per section (Directory, Identity Risk, Governance, Azure, Admin),
   // persisted so it survives a refresh instead of resetting to fully-expanded every
   // reload. A section housing the currently active page always renders expanded
@@ -846,11 +914,11 @@ function App(){
   const toggleSection=name=>setCollapsedSections(prev=>{const next={...prev,[name]:!prev[name]};try{localStorage.setItem('iam_nav_collapsed',JSON.stringify(next));}catch{/* ignore quota/private-mode errors */}return next;});
   let entraContent=sourceId==='entra'&&!data?(cachedOverview?<div className="source-page"><CachedOverviewNotice cache={cachedOverview}/></div>:<div className="empty-state large">Collecting live data from Microsoft Graph - this runs a full tenant query and can take a few seconds on first load or after a browser refresh.</div>):null;
   if(sourceId==='entra'&&data){
-    if(active==='Users')entraContent=<UsersDetailPage data={data}/>;
-    else if(active==='Guests')entraContent=<GuestsPage data={data} onNavigate={chooseNav}/>;
-    else if(active==='Groups')entraContent=<GroupsDetailPage data={data}/>;
-    else if(active==='Applications')entraContent=<ApplicationsDetailPage data={data}/>;
-    else if(active==='Devices')entraContent=<DevicesDetailPage data={data}/>;
+    if(active==='Users')entraContent=<UsersDetailPage data={data} initialQuery={seedForActive?.query} initialFocus={seedForActive?.focusId} seedNonce={seedForActive?.nonce}/>;
+    else if(active==='Guests')entraContent=<GuestsPage data={data} onNavigate={chooseNav} initialQuery={seedForActive?.query}/>;
+    else if(active==='Groups')entraContent=<GroupsDetailPage data={data} initialQuery={seedForActive?.query} seedNonce={seedForActive?.nonce}/>;
+    else if(active==='Applications')entraContent=<ApplicationsDetailPage data={data} initialQuery={seedForActive?.query} seedNonce={seedForActive?.nonce}/>;
+    else if(active==='Devices')entraContent=<DevicesDetailPage data={data} initialQuery={seedForActive?.query} seedNonce={seedForActive?.nonce}/>;
     else if(active==='Risk Overview')entraContent=<RiskDetailPage data={data} onSecurity={grantSecurity} onNavigate={chooseNav}/>;
     else if(active==='Privileged Access')entraContent=<PrivilegedAccessPage data={data}/>;
     else if(active==='Non-Human Identities')entraContent=<NonHumanIdentitiesPage data={data}/>;
@@ -864,7 +932,7 @@ function App(){
     else if(PLACEHOLDER_LABELS.has(active))entraContent=<ComingSoonPage label={active}/>;
     else entraContent=<EntraDashboard data={data} onSecurity={grantSecurity} onNavigate={chooseNav} collectorStatus={collectorStatus}/>;
   }
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;const collapsed=g.section&&Boolean(collapsedSections[g.section])&&!items.some(([label])=>label===active);return <React.Fragment key={g.section||'root'}>{g.section&&<button type="button" className="section-label section-toggle" onClick={()=>toggleSection(g.section)} aria-expanded={!collapsed}><span>{g.section}</span><span className={`section-chevron ${collapsed?'collapsed':''}`}>⌄</span></button>}{!collapsed&&items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div><div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={demoMode?exitDemoMode:localLoginMode?exitLocalLoginMode:signOut}><span>⇥</span>{demoMode?'Exit demo':localLoginMode?'Exit local login':'Sign out'}</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{demoMode?'Demo data • no auto-refresh':localLoginMode?`Local login • saved ${data?.cachedAt?new Date(data.cachedAt).toLocaleString():'previously'} • no auto-refresh`:data?.dataSource==='stale-cache'?`Showing cached snapshot from ${data?.cachedAt?new Date(data.cachedAt).toLocaleTimeString():'earlier'} • refreshing…`:data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{demoMode&&<div className="permission-banner"><div><strong>Showing sample demo data.</strong><span>Not connected to Microsoft Entra - every number here is fabricated for preview/offline use, e.g. when the tenant or Entra itself is unreachable. Exit demo to sign in with a real account.</span></div><button className="primary" onClick={exitDemoMode}>Exit demo</button></div>}{localLoginMode&&<div className="permission-banner"><div><strong>Showing last saved snapshot{data?.cachedAt?` from ${new Date(data.cachedAt).toLocaleString()}`:''}.</strong><span>This is real data from the last successful sign-in on this device, not live - Microsoft sign-in is unavailable or not in use right now. Exit local login to try signing in again.</span></div><button className="primary" onClick={exitLocalLoginMode}>Exit local login</button></div>}{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:active==='Azure Subscriptions'?<AzureSubscriptionsPage data={data} azure={azureData} loading={azureLoading} onGrant={grantAzure}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><span>◆</span></div><div><div className="brand-name">IAM Intelligence</div><div className="brand-tag">Identity. Secure. Simplified.</div></div></div><nav>{NAV_GROUPS.map(g=>{const items=g.items.filter(([label])=>visibleLabels.has(label));if(!items.length)return null;const collapsed=g.section&&Boolean(collapsedSections[g.section])&&!items.some(([label])=>label===active);return <React.Fragment key={g.section||'root'}>{g.section&&<button type="button" className="section-label section-toggle" onClick={()=>toggleSection(g.section)} aria-expanded={!collapsed}><span>{g.section}</span><span className={`section-chevron ${collapsed?'collapsed':''}`}>⌄</span></button>}{!collapsed&&items.map(([label,glyph])=><button key={label} className={`nav-item ${active===label?'active':''}`} onClick={()=>chooseNav(label)}><Icon>{glyph}</Icon><span>{label}</span></button>)}</React.Fragment>})}</nav><div className="sidebar-footer">Source<br/><strong>{sourceById(sourceId).name}</strong></div></aside><main className="main"><header className="topbar"><div className="page-title"><span>{title}</span><span className="chevron">⌄</span></div>{sourceId==='entra'&&data&&<GlobalSearch data={data} onSelect={onSearchSelect}/>}<div className="top-actions"><div className="source-tabs">{DATA_SOURCES.map(s=><button key={s.id} className={`source-tab ${sourceId===s.id?'active':''}`} onClick={()=>chooseSource(s.id)} title={s.type}>{s.name}</button>)}</div><Status ok={sourceId==='entra'||(sourceId==='ad'&&adStatus.connected)} label="Live"/><button className="icon-btn" onClick={refresh} title="Refresh">↻</button><button className="icon-btn labeled" onClick={demoMode?exitDemoMode:localLoginMode?exitLocalLoginMode:signOut}><span>⇥</span>{demoMode?'Exit demo':localLoginMode?'Exit local login':'Sign out'}</button><button className="filter-btn" onClick={()=>setActive('Data Sources')}>Data Sources</button></div></header><div className="content"><div className="live-row"><span className="live-dot"></span> Source: <strong>{sourceById(sourceId).name}</strong><span className="separator">•</span>{sourceId==='entra'?`Tenant: ${data?.organization?.displayName||'Loading…'}`:sourceId==='ad'?`Domain: ${sourceData?.domain||'Loading…'}`:sourceId==='combined'?`${combinedData?.tenantCount??'…'} tenant(s) via collector`:'Connector not configured'}<span className="separator">•</span>{loading?'Collecting live data…':`Last refresh ${data?.collectedAt?new Date(data.collectedAt).toLocaleTimeString():sourceData?.collectedAt?new Date(sourceData.collectedAt).toLocaleTimeString():combinedData?.collectedAt?new Date(combinedData.collectedAt).toLocaleTimeString():'—'}`}{sourceId==='entra'&&<><span className="separator">•</span>{demoMode?'Demo data • no auto-refresh':localLoginMode?`Local login • saved ${data?.cachedAt?new Date(data.cachedAt).toLocaleString():'previously'} • no auto-refresh`:data?.dataSource==='stale-cache'?`Showing cached snapshot from ${data?.cachedAt?new Date(data.cachedAt).toLocaleTimeString():'earlier'} • refreshing…`:data?.dataSource==='collector'?`Collector snapshot • Auto-refresh every ${COLLECTOR_REFRESH_SECONDS}s`:`Live Microsoft Graph • Auto-refresh every ${REFRESH_SECONDS}s`}</>}</div>{demoMode&&<div className="permission-banner"><div><strong>Showing sample demo data.</strong><span>Not connected to Microsoft Entra - every number here is fabricated for preview/offline use, e.g. when the tenant or Entra itself is unreachable. Exit demo to sign in with a real account.</span></div><button className="primary" onClick={exitDemoMode}>Exit demo</button></div>}{localLoginMode&&<div className="permission-banner"><div><strong>Showing last saved snapshot{data?.cachedAt?` from ${new Date(data.cachedAt).toLocaleString()}`:''}.</strong><span>This is real data from the last successful sign-in on this device, not live - Microsoft sign-in is unavailable or not in use right now. Exit local login to try signing in again.</span></div><button className="primary" onClick={exitLocalLoginMode}>Exit local login</button></div>}{active==='Data Sources'?<DataSourcesPage sourceId={sourceId} onSelect={chooseSource} adStatus={adStatus} collectorStatus={collectorStatus}/>:active==='Licenses'?<LicensesPage data={licenseData} loading={licenseLoading} onGrant={grantLicense}/>:active==='App Consent'?<AppConsentPage data={appConsentData} loading={appConsentLoading} onGrant={grantGovernance}/>:active==='Azure Subscriptions'?<AzureSubscriptionsPage data={data} azure={azureData} loading={azureLoading} onGrant={grantAzure}/>:sourceId==='entra'?entraContent:sourceId==='ad'?<ADDashboard data={sourceData}/>:sourceId==='combined'?<CombinedDashboard data={combinedData} collectorStatus={collectorStatus}/>:<div className="empty-state large">{sourceById(sourceId).name} connector is not configured. Open Data Sources to configure it.</div>}</div></main>{toast&&<div className="toast">✓ {toast}</div>}</div>;
 }
 
 // Without this, an uncaught error thrown by ANY single component during render
